@@ -164,6 +164,10 @@ class BatchProcessor:
             except Exception as e:
                 # Record failure but continue with remaining batches
                 failed_chunks += len(batch)
+                import logging
+                logging.getLogger(__name__).error(
+                    "Batch %d/%d failed: %s", batch_idx + 1, batch_count, e
+                )
                 if trace:
                     trace.record_stage(
                         f"batch_{batch_idx}_error",

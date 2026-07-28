@@ -41,6 +41,13 @@ def _register_vision_providers() -> None:
     except ImportError:
         pass
 
+    try:
+        from src.libs.llm.qwen_vision_llm import QwenVisionLLM
+        from src.libs.llm.llm_factory import LLMFactory
+        LLMFactory.register_vision_provider("qwen", QwenVisionLLM)
+    except ImportError:
+        pass
+
 
 class LLMFactory:
     """Factory for creating LLM provider instances.
