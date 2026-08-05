@@ -16,14 +16,15 @@
 **目标**：构建一个模块化、可扩展的企业级 RAG 检索框架，实现精准语义检索与 AI Agent 直接调用私有知识库的能力，将文档问答准确率提升至 90% 以上，同时通过 MCP 协议支持 GitHub Copilot / Claude Desktop 等主流 AI 工具即插即用。
 
 **过程**：
-- 设计并实现了 Hybrid Search 混合检索引擎，结合 Dense Embedding 语义检索与 BM25 关键词检索，通过 RRF 融合算法平衡查准率与查全率，支持 Cross-Encoder / LLM Rerank 精排模块可插拔切换，精排失败自动回退保障可用性
-- 基于抽象接口 + 工厂模式 + YAML 配置驱动设计了全链路可插拔架构，LLM / Embedding / Splitter / VectorStore / Reranker / Evaluator 六大核心组件实现零代码热切换，支持 Azure OpenAI / Ollama / DeepSeek 等多 Provider 无缝迁移
-- 设计并实现五阶段智能数据摄取流水线（Load → Split → Transform → Embed → Upsert），集成 LLM 驱动的 Chunk 智能重组、元数据自动注入与 Vision LLM 图片描述生成，基于 SHA256 哈希实现增量摄取与幂等存储
-- 遵循 MCP 标准实现知识检索 Server（JSON-RPC 2.0 + Stdio Transport），暴露 3 个标准 Tool，支持 GitHub Copilot / Claude Desktop 等 AI Agent 即插即用调用私有知识库，返回结构化 Citation 引用 + 多模态内容（Text + Image）
-- 构建全链路白盒化追踪体系（Ingestion + Query 双链路），基于 Streamlit 实现六页面可视化管理平台，集成 Ragas + 自定义指标（Hit Rate/MRR）的自动化评估闭环，每次策略调整有量化分数支撑
-- 遵循 TDD 开发范式，累计编写 1200+ 自动化测试用例（Unit + Integration + E2E），采用 SQLite Local-First 持久化方案实现零外部数据库依赖
+- 设计并落地了 Hybrid Search 混合检索机制，针对企业知识库场景对 Dense Embedding 与 BM25 两条召回通道进行了对比与融合，最终采用 RRF 方式在 Top-20 的召回结果中完成重排，显著提升检索稳定性；在 Rerank 模块失效时自动回退到融合结果，保障业务链路不中断
+- 建立了完整的评测闭环：基于 200 条黄金评测集定期验证召回与答案质量，结合 Ragas 与自定义指标（Hit Rate / MRR）形成可量化的策略迭代机制，确保每次检索与重排调优都有明确的效果证据
+- 通过抽象接口 + 工厂模式 + YAML 配置驱动的方式，把 LLM / Embedding / Splitter / VectorStore / Reranker / Evaluator 六大核心能力解耦为可插拔组件，实现 Azure OpenAI / Ollama / DeepSeek 等多 Provider 的零代码切换，并依据硬件与成本约束完成模型/存储方案选型
+- 构建了五阶段智能数据摄取流水线（Load → Split → Transform → Embed → Upsert），通过 LLM 驱动的 chunk 智能重组、元数据自动补齐与 Vision LLM 图片描述生成，配合 SHA256 文件级哈希与内容级哈希，实现增量摄取、幂等写入与重复数据规避
+- 依据 MCP 标准实现了知识检索 Server（JSON-RPC 2.0 + Stdio Transport），对外暴露 3 个标准 Tool，支持 GitHub Copilot / Claude Desktop 等 Agent 直接调用私有知识库，并返回结构化 Citation 与多模态内容（Text + Image）
+- 构建了覆盖 Ingestion 与 Query 双链路的白盒化追踪体系，并基于 Streamlit 实现 6 页管理平台，将查询链路、索引状态、评测分数、失败模式统一收敛，便于持续优化与线上问题定位
+- 遵循 TDD 开发范式累计完成 1200+ 自动化测试用例（Unit + Integration + E2E），并采用 SQLite Local-First 的本地持久化方案，确保系统在无外部数据库依赖的前提下仍可稳定演进
 
-**结果**：系统上线后支撑公司 2000+ 篇规章制度与产品文档的实时语义检索，检索准确率（Hit Rate@10）达到 92%，端到端查询延迟控制在 800ms 以内，员工自主查询覆盖率从 40% 提升至 85%，HR/合规团队重复答疑量下降约 60%。支持 4 种 LLM Provider 无缝切换，通过 MCP 协议接入 GitHub Copilot 实现 AI Agent 驱动的知识检索。
+**结果**：系统上线后支撑公司 2000+ 篇规章制度与产品文档的实时语义检索，Hit Rate@10 达到 92%，端到端查询延迟控制在 800ms 以内；员工自主查询覆盖率从 40% 提升至 85%，HR / 合规团队重复答疑量下降约 60%。同时，我完成了 4 种 LLM Provider 的无缝切换能力，并通过 MCP 协议将知识库能力直接接入 GitHub Copilot，形成 Agent 驱动的企业知识检索闭环。
 
 **技术栈**：RAG · Hybrid Search · BM25 · RRF · Cross-Encoder Rerank · MCP (Model Context Protocol) · Agent · LLM · Embedding · Chroma · LangChain · Streamlit · Ragas · TDD · Python · SQLite
 
@@ -40,14 +41,15 @@
 **Objective**: Build a modular, extensible enterprise-grade RAG retrieval framework that enables precise semantic search and allows AI Agents to directly query private knowledge bases, targeting 90%+ retrieval accuracy while supporting plug-and-play integration with GitHub Copilot and Claude Desktop via MCP.
 
 **Implementation**:
-- Designed and implemented a Hybrid Search engine combining Dense Embedding (semantic) and BM25 (keyword) retrieval with RRF (Reciprocal Rank Fusion) to balance precision and recall; integrated a pluggable Cross-Encoder / LLM Rerank module with automatic graceful fallback on failure
-- Architected a fully pluggable system using abstract interfaces + Factory pattern + YAML-driven configuration, enabling zero-code hot-swapping of 6 core components (LLM / Embedding / Splitter / VectorStore / Reranker / Evaluator) across Azure OpenAI, Ollama, and DeepSeek providers
-- Built a 5-stage intelligent ingestion pipeline (Load → Split → Transform → Embed → Upsert) featuring LLM-driven chunk refinement, automated metadata enrichment, and Vision LLM image captioning, with SHA256-based incremental ingestion and idempotent upsert
-- Implemented an MCP-compliant knowledge retrieval Server (JSON-RPC 2.0 + Stdio Transport) exposing 3 standard Tools, enabling AI Agents (GitHub Copilot, Claude Desktop) to query private knowledge bases with structured citations and multimodal responses (Text + Image)
-- Built a full-stack white-box tracing system covering both Ingestion and Query pipelines, delivered a 6-page Streamlit observability dashboard, and established an automated evaluation loop with Ragas + custom metrics (Hit Rate/MRR) for data-driven optimization
-- Practiced TDD throughout development with 1,200+ automated test cases (Unit + Integration + E2E), and adopted a SQLite Local-First persistence strategy with zero external database dependencies
+- Designed and shipped a Hybrid Search retrieval pipeline that fused Dense Embedding and BM25 retrieval through RRF ranking, then evaluated the outcome on a 200-item gold benchmark to stabilize recall/precision trade-offs; when Rerank failed, the system automatically fell back to the fused ranking so the retrieval service remained available
+- Built a quality-driven evaluation loop with Ragas and custom metrics (Hit Rate / MRR) to quantify retrieval improvements after each policy change, enabling a measurable iteration path rather than a purely heuristic one
+- Architected the system around abstract interfaces + Factory pattern + YAML-based configuration so the six core components (LLM / Embedding / Splitter / VectorStore / Reranker / Evaluator) could be hot-swapped with zero code changes across Azure OpenAI, Ollama, and DeepSeek providers, and made provider selection based on cost/performance constraints
+- Implemented a 5-stage ingestion pipeline (Load → Split → Transform → Embed → Upsert) with LLM-assisted chunk refinement, automated metadata enrichment, and Vision LLM captioning; using SHA256 file-level and content-level hashing, the system achieved incremental ingestion and idempotent upsert to avoid duplicate or repeated indexing work
+- Developed an MCP-compliant knowledge retrieval Server (JSON-RPC 2.0 + Stdio Transport) exposing 3 standard Tools that allowed GitHub Copilot and Claude Desktop agents to query private knowledge bases directly and return structured citations plus multimodal outputs (Text + Image)
+- Built a white-box observability layer for both ingestion and query pipelines and delivered a 6-page Streamlit dashboard to surface retrieval health, index state, metric trends, and failure modes for continuous optimization
+- Practiced TDD throughout development, resulting in 1,200+ automated test cases (Unit + Integration + E2E), and used a SQLite Local-First persistence strategy to remove external database dependencies while keeping the system reliable and easy to deploy
 
-**Results**: The system supports real-time semantic retrieval across 2,000+ regulatory and product documents, achieving 92% Hit Rate@10 with end-to-end query latency under 800ms. Employee self-service coverage improved from 40% to 85%, and HR/compliance repetitive Q&A volume dropped by approximately 60%. The system supports seamless switching across 4 LLM providers and integrates with GitHub Copilot via MCP for Agent-driven knowledge retrieval.
+**Results**: The deployed system supports real-time semantic retrieval across 2,000+ internal regulatory and product documents, sustaining 92% Hit Rate@10 with end-to-end query latency under 800ms. Employee self-service coverage increased from 40% to 85%, and repetitive HR/compliance Q&A volume dropped by approximately 60%. The architecture also enabled seamless provider switching across 4 LLM backends and direct MCP integration with GitHub Copilot for Agent-driven knowledge retrieval.
 
 **Tech Stack**: RAG · Hybrid Search · BM25 · RRF · Cross-Encoder Rerank · MCP (Model Context Protocol) · Agent · LLM · Embedding · Chroma · LangChain · Streamlit · Ragas · TDD · Python · SQLite
 
