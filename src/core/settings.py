@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
 import yaml
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Repo root & path resolution
@@ -17,6 +18,9 @@ REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 
 # Default absolute path to settings.yaml
 DEFAULT_SETTINGS_PATH: Path = REPO_ROOT / "config" / "settings.yaml"
+
+# Default absolute path to the .env override file (loaded by load_settings if present)
+DEFAULT_ENV_FILE: Path = REPO_ROOT / "config" / ".env"
 
 
 def resolve_path(relative: Union[str, Path]) -> Path:
@@ -350,22 +354,42 @@ def _apply_env_overrides(data: Dict[str, Any], environ: Mapping[str, str]) -> Di
     """Merge whitelisted env vars into a raw YAML mapping (env wins over YAML).
 
     Only non-blank values override, so an empty/unset env var leaves the YAML
-    value untouched.
+    value untouched.  Overrides are applied only to top-level sections already
+    present in the YAML: an env var must never *resurrect* a section that the
+    config omits, because that partial section would then fail validation
+    (e.g. ``VISION_API_KEY`` on a config without a ``vision_llm`` block must
+    not turn into ``vision_llm: {api_key: ...}`` and raise
+    ``Missing required field: vision_llm.enabled``).
     """
     for env_name, dotted_path in _ENV_OVERRIDES.items():
         value = environ.get(env_name)
-        if value is not None and value.strip():
-            _set_nested(data, dotted_path, value.strip())
+        if value is None or not value.strip():
+            continue
+        section = dotted_path.split(".")[0]
+        if section not in data or not isinstance(data[section], dict):
+            continue
+        _set_nested(data, dotted_path, value.strip())
     return data
 
 
-def load_settings(path: str | Path | None = None) -> Settings:
+def load_settings(path: str | Path | None = None, *, env_file: Path | None = None) -> Settings:
     """Load settings from a YAML file and validate required fields.
+
+    Before parsing YAML, an optional ``.env`` file is loaded into the process
+    environment (when present) so the whitelisted env overrides below can apply.
+    Precedence: process environment > ``.env`` file > ``settings.yaml``.
 
     Args:
         path: Path to settings YAML.  Defaults to
             ``<repo>/config/settings.yaml`` (absolute, CWD-independent).
+        env_file: Path to a ``.env`` file to load.  Defaults to
+            ``<repo>/config/.env``; pass ``None`` explicitly to skip loading.
     """
+    env_path = Path(env_file) if env_file is not None else DEFAULT_ENV_FILE
+    if env_path.exists():
+        # override=False: an already-set process env var wins over the .env file.
+        load_dotenv(dotenv_path=env_path, override=False)
+
     settings_path = Path(path) if path is not None else DEFAULT_SETTINGS_PATH
     if not settings_path.is_absolute():
         settings_path = resolve_path(settings_path)

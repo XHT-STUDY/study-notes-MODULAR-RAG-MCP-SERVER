@@ -1,6 +1,6 @@
 # Modular RAG MCP Server - 配置模板
-# 复制为 config/settings.yaml 后填写，或用下方环境变量覆盖（env 优先于 yaml）。
-# 密钥请使用环境变量，勿写入文件。
+# 复制为 config/settings.yaml 后填写；密钥/覆盖可写入 config/.env（load_settings 自动加载）。
+# 优先级：进程环境变量 > config/.env > settings.yaml。密钥请勿写入本文件。
 
 # =============================================================================
 # LLM Configuration

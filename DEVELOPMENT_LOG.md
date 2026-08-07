@@ -32,6 +32,70 @@
 
 ---
 
+## Phase 0 优化 — 配置去重：.env 生效并接管密钥（2026-08-07）
+
+### 1. 本次开发了哪些内容
+
+让原本**不生效的死文档 `config/.env`** 真正参与配置加载，并把真实密钥从 `settings.yaml` 剥离：
+
+- **`src/core/settings.py`**：接入 `python-dotenv` —— `load_settings()` 在解析 YAML 前自动加载 `config/.env`（文件不存在则跳过），`load_dotenv(override=False)` 保证「进程环境变量 > .env > yaml」。新增 `DEFAULT_ENV_FILE` 常量与 keyword-only `env_file=` 参数（现约 30 个调用点均不受影响）。
+- **`src/core/settings.py`**：修复 `_apply_env_overrides` 潜在 bug —— env 覆盖只作用于 YAML **已存在**的顶层 section。此前 `VISION_API_KEY`/`VISION_BASE_URL` 会把缺失的 `vision_llm` 复活成 `vision_llm: {api_key: ...}` 残缺 dict，导致 `from_dict` 抛 `Missing required field: vision_llm.enabled` 崩溃（本次测试暴露的根因）。
+- **`pyproject.toml` + `uv.lock`**：新增依赖 `python-dotenv>=1.0`，`uv lock` 重新生成锁文件。
+- **`config/.env`（新建，gitignored）**：真实密钥/BaseURL 从 settings.yaml 迁入（8 个变量）。
+- **`config/settings.yaml`**：`llm`/`embedding`/`vision_llm` 三段的 `api_key`/`base_url` 置空，`model`/`provider` 等保留。
+- **`config/.env.example` / `config/settings.yaml.example`**：头部注释更新为「自动加载 + 优先级：进程环境变量 > config/.env > settings.yaml」。
+- **`tests/unit/conftest.py`（新建）**：autouse `_isolate_dotenv` fixture，将 `DEFAULT_ENV_FILE` 指向不存在路径，保证单测不加载真实 .env；集成/端到端测试仍加载真实 .env 以连真实 API（保持迁移前「密钥在 yaml」时的行为）。
+- **`tests/unit/test_config_loading.py`**：新增 3 个 dotenv 用例（dotenv 覆盖 YAML / 进程 env 优先 / 缺失 .env 无副作用）。
+- **`CLAUDE.md`**：新增「配置约定」说明。
+
+### 2. 测试方法与预期效果
+
+```powershell
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_config_loading.py -q
+.\.venv-3.12\Scripts\python.exe -m pytest -m "not llm" -q --tb=no -p no:cacheprovider   # 与基线 diff
+.\.venv-3.12\Scripts\python.exe -m ruff check src/core/settings.py tests/conftest.py tests/unit/conftest.py tests/unit/test_config_loading.py
+.\.venv-3.12\Scripts\python.exe -m mypy src/core/settings.py
+.\.venv-3.12\Scripts\python.exe scripts/self_check.py
+.\.venv-3.12\Scripts\python.exe scripts/query.py --query "模块化 RAG 架构" --top-k 3
+```
+
+**预期效果**：dotenv 用例通过；真实 .env 不再污染/破坏单测；`self_check` 9/9 通过；一次真实查询确认密钥经 `.env` 注入。
+
+### 3. 本次改动的原因
+
+| 问题 | 后果 | 解决 |
+|---|---|---|
+| 代码从不加载 `.env`（无 dotenv 依赖） | 用户按模板填 `.env` 不生效，纯死文档 | `load_settings` 自动加载 |
+| `settings.yaml` 明文存真实密钥 | 与「密钥勿入文件」意图矛盾 | 密钥迁入 `.env`，yaml 留空 |
+| 8 个 env 变量与 yaml 字段一一对应 | 同一信息两处存放，且 env 覆盖闲置 | 明确分工：`.env`=密钥/覆盖，yaml=其余配置 |
+
+### 4. 重点难点
+
+- **测试隔离（最大难点）**：`load_settings` 是全局唯一漏斗，一旦加载 `config/.env`，整个 pytest 进程的 `os.environ` 被真实密钥（含 `VISION_API_KEY` 等）污染。且 pytest 中 **module-scoped fixture 会在 function-scoped autouse fixture 之前实例化**，集成测试的 module 级 `settings` fixture 仍会加载真实 .env。最终双管齐下：①隔离 fixture 限定到 `tests/unit/`；②修复 `_apply_env_overrides`（env 不复活缺失 section），从根上杜绝崩溃。
+- **Windows 环境**：`uv sync` 因 `.venv/Scripts` 目录被进程占用而失败，改用 `uv pip install --python <venv>` 装 dotenv。
+- **ruff isort**：`from dotenv import load_dotenv` 应排在 `import yaml` 之后（straight-imports-first），用 `ruff --fix` 校准。
+
+### 5. 你应该学到什么
+
+- `python-dotenv` 的 `override=False` 语义与「进程 env > .env > 配置文件」优先级链。
+- pytest fixture 作用域（function vs module）与 autouse 实例化顺序对全局副作用（`os.environ` 变异）隔离的影响。
+- 在单一配置漏斗（`load_settings`）收敛加载逻辑，而非散落各入口。
+- 秘密与配置分离的最佳实践：gitignored `.env` 管密钥，yaml 管非机密配置。
+
+### 6. 验证结果与遗留事项
+
+实际数字：
+
+- `pytest tests/unit/test_config_loading.py`：**11 passed**（8 旧 + 3 新）。
+- 全量 `pytest -m "not llm"`（与 `git stash` 基线 diff）：改动后 **76** 项 fail/error，基线 **80**。新增仅 `test_trace_context.py::test_total_elapsed_positive` —— 经基线隔离跑 5 次仍 fail 2 次，确认是既有 flaky 计时用例（`time.monotonic()` 返回 0.0），非本次引入；另有 5 个真实 API 摄取测试由 fail 转 pass（同为 flaky）。**零新增回归**。
+- `ruff check`（4 个改动文件）：新增代码 **0 错误**；剩余 47 处为既有问题，与基线一致（仅行号偏移）。
+- `mypy src/core/settings.py`：**Success, no issues**。
+- `scripts/self_check.py`：**9 OK / 0 WARN / 0 FAIL**，Result PASS（[9/9] API keys ready 经 .env 注入）。
+- `scripts/query.py --query "模块化 RAG 架构"`：返回 **3 条真实结果**（embedding API 调用成功，密钥经 .env 生效）。
+- **遗留**：全量既有失败（ragas 版本 / jieba 分词 / azure 配置 / 计时 flaky）非本次引入；`config/.env` 含真实密钥（已 gitignored，勿提交）；git 历史仍留有旧 key，需用户轮换。
+
+---
+
 ## Phase 1 修复 — mcp 版本锁定回归（2026-08-07）
 
 ### 1. 本次开发了哪些内容

@@ -43,6 +43,8 @@ python scripts/start_dashboard.py --port 8501
 
 **注意**：`main.py` 目前是 **stub**（只打印 "MCP Server will be implemented in Phase E"），`mcp-server` 控制台脚本也指向它，均未启动服务器。真正的 MCP 服务器入口是 `python src/mcp_server/server.py`。
 
+**配置约定**：`load_settings()` 会自动加载 `config/.env`（不存在则跳过）。密钥与覆盖项放 `config/.env`，`config/settings.yaml` 中 `api_key`/`base_url` 字段留空。优先级：进程环境变量 > `config/.env` > `settings.yaml`。
+
 ## 架构概览
 
 分层结构（`src/` 下按 `pyproject.toml` 的 wheel packages 打包）：

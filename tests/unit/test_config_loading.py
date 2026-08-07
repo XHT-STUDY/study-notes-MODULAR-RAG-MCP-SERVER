@@ -169,3 +169,36 @@ def test_blank_env_ignored(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("LLM_API_KEY", "")
     settings = load_settings(EXAMPLE_SETTINGS)
     assert settings.llm.api_key is None
+
+
+# ---------------------------------------------------------------------------
+# Dotenv: config/.env is auto-loaded by load_settings (env_file= opt-in in tests)
+# ---------------------------------------------------------------------------
+
+
+def test_dotenv_file_overrides_yaml(clean_env: None, tmp_path: Path) -> None:
+    """A .env file passed via env_file= populates the whitelisted settings."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_API_KEY=sk-dotenv\n", encoding="utf-8")
+
+    settings = load_settings(EXAMPLE_SETTINGS, env_file=env_file)
+
+    assert settings.llm.api_key == "sk-dotenv"
+
+
+def test_process_env_wins_over_dotenv(clean_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Process env (override=False) beats the .env file value."""
+    monkeypatch.setenv("LLM_API_KEY", "sk-proc")
+    env_file = tmp_path / ".env"
+    env_file.write_text("LLM_API_KEY=sk-dotenv\n", encoding="utf-8")
+
+    settings = load_settings(EXAMPLE_SETTINGS, env_file=env_file)
+
+    assert settings.llm.api_key == "sk-proc"
+
+
+def test_missing_env_file_is_noop(clean_env: None, tmp_path: Path) -> None:
+    """A missing .env path leaves the YAML value untouched."""
+    settings = load_settings(EXAMPLE_SETTINGS, env_file=tmp_path / "does_not_exist.env")
+
+    assert settings.llm.api_key is None
