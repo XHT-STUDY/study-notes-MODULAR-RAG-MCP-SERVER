@@ -105,20 +105,53 @@
 
 ```bash
 git clone <repo-url>
-cd Modular-RAG-MCP-Server
+cd MODULAR-RAG-MCP-SERVER
 ```
 
-### 2. 一键配置（Setup Skill）
+### 2. 一键引导（推荐，全新环境可用）
 
-本项目提供了 **Setup Skill** 一键完成所有环境配置，包括：Provider 选择 → API Key 配置 → 依赖安装 → 配置文件生成 → Dashboard 启动。
+一条命令完成：创建 Python 3.12 虚拟环境 → 按 `uv.lock` 严格安装依赖（`uv sync --locked`）→ 生成 `config/settings.yaml`（无密钥模板）→ 运行环境自检 → （可选）摄取示例文档 → （可选）冒烟查询。
 
-在 VS Code 中打开项目，通过 Copilot / Claude 对话框输入：
+```bash
+# Windows (PowerShell / CMD)
+.\bootstrap.bat --seed
 
+# macOS / Linux
+./bootstrap.sh --seed
 ```
-setup
+
+带冒烟查询（需要已配置 Embedding / LLM API Key）：
+
+```bash
+.\bootstrap.bat --full
 ```
 
-Agent 会自动引导你完成全部配置流程。
+> 说明：
+> - 若现有 `.venv` 不是 Python 3.12，**不会被改动**——bootstrap 会另建 `.venv-3.12`。
+> - `--seed` 摄取 `tests/fixtures/sample_documents/` 中的示例 PDF，需要可用的 Embedding（设置 `EMBEDDING_API_KEY`，或用本地 Ollama）。
+> - 未安装 `uv` 时 bootstrap 会打印安装命令（[uv 官网](https://docs.astral.sh/uv/)）。
+
+### 3. 手动安装（等价步骤）
+
+不借助 bootstrap 时，等价的精确步骤（保证环境可复现）：
+
+```bash
+uv venv .venv --python 3.12
+uv sync --locked              # 严格按 uv.lock 安装，环境可复现
+python scripts/self_check.py  # 环境自检，期望全绿（退出码 0）
+```
+
+### 4. 配置 API Key（可选；纯检索可跳过）
+
+bootstrap 生成的 `config/settings.yaml` 不含任何密钥。推荐用环境变量注入（优先级高于 YAML），完整清单见 `config/.env.example`：
+
+```bash
+export LLM_API_KEY=sk-xxx
+export EMBEDDING_API_KEY=sk-xxx
+export VISION_API_KEY=sk-xxx
+```
+
+也可以使用交互式 **Setup Skill**（在 VS Code 中通过 Copilot / Claude 对话框输入 `setup`）完成 Provider 选择 → API Key 配置 → Dashboard 启动。
 
 > 💡 如果不熟悉 Skill 的使用方式，请观看配套笔记中的 **Setup Skill 使用讲解视频**。
 

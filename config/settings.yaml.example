@@ -1,0 +1,119 @@
+# Modular RAG MCP Server - 配置模板
+# 复制为 config/settings.yaml 后填写，或用下方环境变量覆盖（env 优先于 yaml）。
+# 密钥请使用环境变量，勿写入文件。
+
+# =============================================================================
+# LLM Configuration
+# =============================================================================
+llm:
+  provider: "qwen"        # openai | azure | ollama | deepseek | qwen（与代码注册一致，无 gemini）
+  model: "qwen-turbo"
+  deployment_name: ""
+  azure_endpoint: ""
+  api_version: ""
+  api_key: ""             # 用环境变量 LLM_API_KEY 注入
+  base_url: ""            # 用环境变量 LLM_BASE_URL 注入（Ollama/私有化网关）
+  temperature: 0.0
+  max_tokens: 4096
+
+# =============================================================================
+# Embedding Configuration
+# =============================================================================
+embedding:
+  provider: "qwen"        # openai | azure | ollama | qwen
+  model: "text-embedding-v3"
+  dimensions: 1024
+  azure_endpoint: ""
+  deployment_name: ""
+  api_version: ""
+  api_key: ""             # 环境变量 EMBEDDING_API_KEY
+  base_url: ""            # 环境变量 EMBEDDING_BASE_URL
+
+# =============================================================================
+# Vision LLM Configuration（图像理解/字幕）
+# =============================================================================
+vision_llm:
+  enabled: true
+  provider: "qwen"        # openai | azure | ollama | qwen
+  model: "qwen-vl-max"
+  azure_endpoint: ""
+  deployment_name: ""
+  api_version: ""
+  api_key: ""             # 环境变量 VISION_API_KEY
+  base_url: ""            # 环境变量 VISION_BASE_URL
+  max_image_size: 2048
+
+# =============================================================================
+# Vector Store Configuration
+# =============================================================================
+vector_store:
+  provider: "chroma"      # chroma | qdrant | pinecone（本地默认 chroma）
+  persist_directory: "./data/db/chroma"
+  collection_name: "knowledge_hub"
+
+# =============================================================================
+# Retrieval Configuration
+# =============================================================================
+retrieval:
+  dense_top_k: 20
+  sparse_top_k: 20
+  fusion_top_k: 10
+  rrf_k: 60
+
+# =============================================================================
+# Rerank Configuration
+# =============================================================================
+rerank:
+  enabled: false          # true 时用 LLM/cross-encoder 重排
+  provider: "none"        # none | llm | cross_encoder
+  model: "none"
+  top_k: 5
+
+# =============================================================================
+# Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
+  provider: "custom"      # custom | ragas | composite
+  metrics:
+    - "hit_rate"
+    - "mrr"
+    - "faithfulness"
+
+# =============================================================================
+# Observability Configuration
+# =============================================================================
+observability:
+  log_level: "INFO"
+  trace_enabled: true
+  trace_file: "./logs/traces.jsonl"
+  structured_logging: true
+
+# =============================================================================
+# Ingestion Configuration
+# =============================================================================
+ingestion:
+  chunk_size: 1000
+  chunk_overlap: 200
+  splitter: "recursive"
+  batch_size: 10
+  chunk_refiner:
+    use_llm: true
+  metadata_enricher:
+    use_llm: true
+
+# =============================================================================
+# Agentic RAG（Phase 6 预留，默认关闭；启用后走 Agent 循环而非直通检索）
+# 对应 src/core/settings.py 的 AgentSettings 可选块，完整 schema 见 §9.4。
+# =============================================================================
+# agent:
+#   enabled: false            # false → NoneAgent，保持 query_knowledge_hub 直通
+#   strategy: "react"         # react | plan_and_execute | self_ask
+#   max_iterations: 5
+#   router: { enabled: true, provider: "rule" }
+#   memory: { enabled: false, backend: "none", window_size: 10 }
+#   reflection: { enabled: true, max_retrieval_rounds: 2 }
+#   tools:
+#     - "query_knowledge_hub"
+#     - "list_collections"
+#     - "get_document_summary"

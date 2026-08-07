@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 import yaml
 
@@ -85,6 +86,18 @@ def _require_list(data: Dict[str, Any], key: str, path: str) -> List[Any]:
     if not isinstance(value, list):
         raise SettingsError(f"Expected list for field: {path}.{key}")
     return value
+
+
+def _optional(value: Any) -> Optional[str]:
+    """Coerce a blank value to ``None`` for optional string fields.
+
+    A blank YAML value (``""``) is treated as "not configured" so that
+    consumers can rely on ``None`` meaning "unset" — matching the behaviour
+    of a missing key. Non-string values are also treated as unset.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
 
 
 @dataclass(frozen=True)
@@ -222,11 +235,11 @@ class Settings:
                 provider=_require_str(vision_llm, "provider", "vision_llm"),
                 model=_require_str(vision_llm, "model", "vision_llm"),
                 max_image_size=_require_int(vision_llm, "max_image_size", "vision_llm"),
-                api_key=vision_llm.get("api_key"),
-                api_version=vision_llm.get("api_version"),
-                azure_endpoint=vision_llm.get("azure_endpoint"),
-                deployment_name=vision_llm.get("deployment_name"),
-                base_url=vision_llm.get("base_url"),
+                api_key=_optional(vision_llm.get("api_key")),
+                api_version=_optional(vision_llm.get("api_version")),
+                azure_endpoint=_optional(vision_llm.get("azure_endpoint")),
+                deployment_name=_optional(vision_llm.get("deployment_name")),
+                base_url=_optional(vision_llm.get("base_url")),
             )
 
         settings = cls(
@@ -235,21 +248,21 @@ class Settings:
                 model=_require_str(llm, "model", "llm"),
                 temperature=_require_number(llm, "temperature", "llm"),
                 max_tokens=_require_int(llm, "max_tokens", "llm"),
-                api_key=llm.get("api_key"),
-                api_version=llm.get("api_version"),
-                azure_endpoint=llm.get("azure_endpoint"),
-                deployment_name=llm.get("deployment_name"),
-                base_url=llm.get("base_url"),
+                api_key=_optional(llm.get("api_key")),
+                api_version=_optional(llm.get("api_version")),
+                azure_endpoint=_optional(llm.get("azure_endpoint")),
+                deployment_name=_optional(llm.get("deployment_name")),
+                base_url=_optional(llm.get("base_url")),
             ),
             embedding=EmbeddingSettings(
                 provider=_require_str(embedding, "provider", "embedding"),
                 model=_require_str(embedding, "model", "embedding"),
                 dimensions=_require_int(embedding, "dimensions", "embedding"),
-                api_key=embedding.get("api_key"),
-                api_version=embedding.get("api_version"),
-                azure_endpoint=embedding.get("azure_endpoint"),
-                deployment_name=embedding.get("deployment_name"),
-                base_url=embedding.get("base_url"),
+                api_key=_optional(embedding.get("api_key")),
+                api_version=_optional(embedding.get("api_version")),
+                azure_endpoint=_optional(embedding.get("azure_endpoint")),
+                deployment_name=_optional(embedding.get("deployment_name")),
+                base_url=_optional(embedding.get("base_url")),
             ),
             vector_store=VectorStoreSettings(
                 provider=_require_str(vector_store, "provider", "vector_store"),
@@ -305,6 +318,47 @@ def validate_settings(settings: Settings) -> None:
         raise SettingsError("Missing required field: observability.log_level")
 
 
+# Environment variable → dotted settings path whitelist.
+# Only security-sensitive / commonly-tweaked keys are mapped; everything else
+# keeps its YAML value. Extend for Phase 6, e.g. "AGENT_ENABLED": "agent.enabled".
+_ENV_OVERRIDES: Dict[str, str] = {
+    "LLM_API_KEY": "llm.api_key",
+    "LLM_BASE_URL": "llm.base_url",
+    "LLM_MODEL": "llm.model",
+    "EMBEDDING_API_KEY": "embedding.api_key",
+    "EMBEDDING_BASE_URL": "embedding.base_url",
+    "EMBEDDING_MODEL": "embedding.model",
+    "VISION_API_KEY": "vision_llm.api_key",
+    "VISION_BASE_URL": "vision_llm.base_url",
+}
+
+
+def _set_nested(data: Dict[str, Any], dotted: str, value: str) -> None:
+    """Write *value* into *data* at the given ``a.b.c`` path, creating dicts as needed."""
+    keys = dotted.split(".")
+    node: Any = data
+    for key in keys[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            node[key] = child
+        node = child
+    node[keys[-1]] = value
+
+
+def _apply_env_overrides(data: Dict[str, Any], environ: Mapping[str, str]) -> Dict[str, Any]:
+    """Merge whitelisted env vars into a raw YAML mapping (env wins over YAML).
+
+    Only non-blank values override, so an empty/unset env var leaves the YAML
+    value untouched.
+    """
+    for env_name, dotted_path in _ENV_OVERRIDES.items():
+        value = environ.get(env_name)
+        if value is not None and value.strip():
+            _set_nested(data, dotted_path, value.strip())
+    return data
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     """Load settings from a YAML file and validate required fields.
 
@@ -321,6 +375,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     with settings_path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle)
 
-    settings = Settings.from_dict(data or {})
+    data = _apply_env_overrides(data or {}, os.environ)
+    settings = Settings.from_dict(data)
     validate_settings(settings)
     return settings

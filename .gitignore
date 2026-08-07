@@ -79,9 +79,6 @@ config/settings.yaml.bak
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# pyenv
-.python-version
-
 # mypy
 .mypy_cache/
 .dmypy.json
@@ -99,6 +96,10 @@ traces.jsonl
 
 # Auto-coder skill cache
 .github/skills/auto-coder/.spec_hash
+
+# Local runtime config (may contain real secrets) and generated reports
+config/settings.yaml
+reports/
 
 # Secrets
 .env.local
