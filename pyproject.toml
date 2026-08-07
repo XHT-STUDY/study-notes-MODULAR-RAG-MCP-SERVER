@@ -25,7 +25,9 @@ dependencies = [
     "pyyaml>=6.0",
     "langchain-text-splitters>=0.3.0",
     "chromadb>=0.4.0",
-    "mcp>=1.0.0",
+    # mcp 2.0.0 removed the lowlevel.Server.list_tools/call_tool decorators used by
+    # src/mcp_server/protocol_handler.py — keep on the 1.x line (>=1.28.1 verified).
+    "mcp>=1.28.1,<2.0.0",
     "jieba>=0.42",
     "markitdown[pdf]>=0.1.0",
     "streamlit>=1.30.0",

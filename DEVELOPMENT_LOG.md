@@ -32,6 +32,68 @@
 
 ---
 
+## Phase 1 修复 — mcp 版本锁定回归（2026-08-07）
+
+### 1. 本次开发了哪些内容
+
+修复全新 clone 后 **MCP 服务器启动即崩溃** 的锁文件回归：
+
+- **`pyproject.toml`**：`mcp>=1.0.0` → `mcp>=1.28.1,<2.0.0`，并附注释说明原因（mcp 2.0.0 移除了 `lowlevel.Server.list_tools/call_tool` 装饰器，项目代码用的是 1.x 装饰器 API）。
+- **`uv.lock`**：重新 `uv lock`，mcp `2.0.0 → 1.29.0`（PyPI 最新 1.x；2.0.0 是唯一 2.x）。顺带移除 mcp 2.x 专属依赖 `httpcore2`/`httpx2`/`mcp-types`/`truststore`。`uv.lock` 中 mcp 的唯一反向依赖就是项目自身，relock 干净无其他无关注入。
+- **`tests/unit/test_protocol_handler.py`**：3 处 `create_mcp_server(...)` 传入预注册 handler 时补 `register_tools=False`。这是**既有测试 bug**（不是版本回归）：默认 `register_tools=True` 会把 `query_knowledge_hub` 等默认工具重复注册到已含同名工具的 handler，抛 `ValueError: Tool 'query_knowledge_hub' is already registered`。
+
+### 2. 测试方法与预期效果
+
+在 `.venv-3.12`（Phase 1 锁定目标环境，等价 fresh clone 的 `.venv`）下：
+
+```powershell
+.\.venv-3.12\Scripts\python.exe -m src.mcp_server.server     # 管道发 initialize，应握手成功而非崩溃
+.\.venv-3.12\Scripts\python.exe -m pytest tests/e2e/test_mcp_client.py -q
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_protocol_handler.py tests/integration/test_mcp_server.py -q
+.\.venv-3.12\Scripts\python.exe -m pytest -m "not llm" -q
+```
+
+**预期效果**：服务器能完成 `initialize → tools/list → tools/call` 全生命周期；此前全部 `Got: []` 的 e2e 转绿；全量失败数较 Phase 1 锁定基线（1162/56）明显下降。
+
+### 3. 本次改动的原因
+
+| 问题 | 后果 |
+|---|---|
+| `pyproject.toml` 声明 `mcp>=1.0.0`（无上界） | `uv lock` 解析到最新 **2.0.0** |
+| mcp 2.0.0 移除 `lowlevel.Server.list_tools/call_tool` 装饰器 | `protocol_handler.py:246/252` 启动即抛 `AttributeError: 'Server' object has no attribute 'list_tools'` |
+| e2e 服务器进程秒退 | `test_mcp_client.py` 全部 `Got: []`，MCP 核心能力在 fresh clone 上不可用 |
+
+开发机 `.venv` 恰好是 mcp 1.28.1（未锁定），所以 Phase 1 阶段没暴露；全新 clone 用 `uv sync --locked` 严格按锁安装才复现。
+
+### 4. 重点难点
+
+- **方案取舍**：选「收紧上界锁回 1.x」而非「迁移到 mcp 2.0 `add_request_handler` API」——2.0 是预览版、迁移侵入大，且项目代码零 2.0 特性需求。
+- **下界取值**：取 1.28.1（开发机实测兼容）而非 1.0.0，避免声明过宽。
+- **判别「环境相关 vs 真回归」**：用隔离单测 + 系统 Python（mcp 1.28.1）复测那个失败的 protocol 用例，证明它是测试自身重复注册 bug 而非版本差异；再用 Phase 1 已记录的 `test_multiple_tool_calls_same_session` 突发 flake 对照，确认剩余的 1 个 e2e 失败是既有环境问题。
+
+### 5. 你应该学到什么
+
+- **无上界的 `>=` 依赖约束 + 锁文件 = 升级风暴隐患**：协议类关键依赖（mcp/ragas 等）应加 `,<major+1` 上界，否则 `uv lock` 一次 relock 就可能锁进破坏性大版本。
+- **验证锁文件回归的黄金路径**：fresh clone + `bootstrap`（严格 `uv sync --locked`）是最真实的复现场景；开发机未锁定的 `.venv` 会掩盖这类问题。
+- **测试自身 bug 的判别法**：把可疑用例放到已知兼容版本（系统 Python 1.28.1）单独跑，若照旧失败则非版本回归。
+
+### 6. 验证结果与遗留事项
+
+**实测数字**（`.venv-3.12`，CPython 3.12.4 + mcp 1.29.0）：
+- 服务器启动：`initialize` 握手成功，返回 `serverInfo{name: modular-rag-mcp-server}`（修复前 AttributeError 秒崩）。
+- e2e `test_mcp_client.py`：**7/7 通过**（修复前 7 个全 `Got: []`）。
+- `test_protocol_handler.py` + `test_mcp_server.py`：**26/26 通过**（修复前 25/26，已修测试重复注册 bug）。
+- 全量回归 `-m "not llm"`：**1300 passed / 47 failed / 8 skipped / 29 errors**（Phase 1 锁定基线 1162/56）。剩余失败全部为既有类目：ragas 17、azure provider 假设 11、Chroma 临时目录文件锁 20 error、embedding/reranker/refiner 缺 key、jieba、trace 结构等；唯一的 mcp 相关失败是 Phase 1 §4 已记录的 `test_multiple_tool_calls_same_session`（突发多调用超 60s，隔离运行 7/7 通过）。
+- ruff：编辑的测试文件 23 处告警全部为**既有**（I001/UP035/UP006/F401/F841），本次改动 0 新增。
+
+**遗留事项**：
+- 未 commit / push（待用户确认后处理）。
+- `DASHSCOPE_API_KEY` 环境变量已失效（阿里云 401），seed/冒烟查询需用户轮换后补跑。
+- ragas 0.4.3 / jieba / Chroma 文件锁等既有失败按计划 Phase 3 处理。
+- 已知 cosmetic 问题：`serverInfo.version` 显示的是 mcp SDK 版本（1.29.0）而非 `SERVER_VERSION`（0.1.0），`create_initialization_options` 未接项目版本常量，历史遗留，本次不处理。
+
+---
+
 ## Phase 1 — 依赖锁定 + 一键引导 + 环境自检（2026-08-06）
 
 ### 1. 本次开发了哪些内容
