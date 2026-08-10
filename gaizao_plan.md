@@ -63,7 +63,7 @@ data/                本地内嵌存储（ChromaDB / SQLite / BM25 JSON），首
 | Phase 1 | 可复现地基 | 依赖锁定 + 一键引导 + 自检 | ✅ 实施 |
 | Phase 2 | 生成式问答链路 | answer_generator + refusal/confidence/grounding | 路线图 |
 | Phase 3 | 评测闭环 | golden 补齐 + 多指标 + 报告对比 | 路线图 |
-| Phase 4 | 数据版本与更新 | 孤儿 GC + 版本跟踪 + 原子更新 | 路线图 |
+| Phase 4 | 数据版本与更新 | 孤儿 GC + 版本跟踪 + 原子更新 | ✅ 实施 |
 | Phase 5 | Prompt + 文档 + CI | prompt 版本化 + REPRODUCE.md + CI | 路线图 |
 | Phase 6 | Agentic RAG 能力层 | Agent 循环/工具/路由/记忆/反射 | 路线图（前瞻设计，见 §9） |
 
@@ -415,16 +415,16 @@ class TemplateAnswerGenerator(BaseAnswerGenerator):
 
 ---
 
-## 7. Phase 4 — 数据版本与更新闭环（路线图，详细设计）
+## 7. Phase 4 — 数据版本与更新闭环（本次实施）
 
 **目标**：数据更新不出孤儿、可回滚。
 
-**交付**：
-- **修复 BM25 孤儿 bug**：[src/ingestion/storage/bm25_indexer.py](src/ingestion/storage/bm25_indexer.py) `remove_document` 按内容 hash 前缀匹配，与 chunk_id 的 source_path hash 前缀不一致 → 改为按 source_path 前缀匹配删除。
-- **原子更新**：[document_manager.py](src/ingestion/document_manager.py) 的跨 4 存储（Chroma/BM25/Image/SQLite）删除改为事务式（先记录意图、全部成功后提交；失败回滚+告警）。
-- **文档版本跟踪**：SQLite `ingestion_history` 扩展版本字段；支持按版本回滚某文档到上一内容版本。
-- **孤儿 GC**：扫描 Chroma collection，删除无 `ingestion_history` 记录对应的 chunk。
-- **rerank 默认开**：在真实评测通过后，`rerank.enabled` 默认改 true。
+**交付**（实现见 `DEVELOPMENT_LOG.md` Phase 4 条目）：
+- ✅ **修复 BM25 孤儿 bug**：新增 [src/ingestion/storage/chunk_ids.py](src/ingestion/storage/chunk_ids.py) `chunk_id_prefix()`，`remove_document`/`add_documents` 调用方统一改传**路径前缀**（原来是内容 hash 前缀，永远匹配不上存储的路径前缀 → 删除 no-op、重摄留孤儿）。
+- ✅ **原子更新**：[document_manager.py](src/ingestion/document_manager.py) 跨 4 存储（Chroma/BM25/Image/SQLite）删除改为事务式（捕获快照 → 依次删除 → 失败用快照恢复 + 告警）；更新路径（同路径重摄）load 后识别 `is_update`，存储成功后清理旧版本残留。
+- ✅ **文档版本跟踪**：[src/ingestion/versioning/version_store.py](src/ingestion/versioning/version_store.py) 新增 `document_versions` ledger + 内容快照（`data/versions/`）；支持按版本回滚某文档到上一内容版本（快照 + 重摄）。
+- ✅ **孤儿 GC**：[src/ingestion/storage/orphan_gc.py](src/ingestion/storage/orphan_gc.py) 扫描 Chroma/BM25/Images/SQLite，删除不在 active 集（history success − ledger superseded）的残留；[scripts/gc.py](scripts/gc.py) 提供 `--collection` / `--dry-run` CLI。
+- ⚠️ **rerank 保持关闭**（用户拍板）：Phase 3 ablation 的 `hybrid_rerank` 从未真正重排（`config_snapshot` 显示 rerank 禁用），无收益证据；等真实 rerank 评测（Phase 3 完善真实 rerank provider 后）再按下方约定默认开。
 
 ---
 

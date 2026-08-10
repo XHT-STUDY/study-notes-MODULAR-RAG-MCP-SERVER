@@ -20,6 +20,7 @@ from typing import List, Dict, Any, Optional
 from src.core.types import Chunk
 from src.core.settings import Settings
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
+from src.ingestion.storage.chunk_ids import chunk_id_prefix
 
 
 class VectorUpserter:
@@ -159,7 +160,7 @@ class VectorUpserter:
         chunk_index = chunk.metadata["chunk_index"]
         
         # Compute stable hashes
-        source_hash = hashlib.sha256(source_path.encode("utf-8")).hexdigest()[:8]
+        source_hash = chunk_id_prefix(source_path)
         content_hash = hashlib.sha256(chunk.text.encode("utf-8")).hexdigest()[:8]
         
         # Format: {source_hash}_{index:04d}_{content_hash}

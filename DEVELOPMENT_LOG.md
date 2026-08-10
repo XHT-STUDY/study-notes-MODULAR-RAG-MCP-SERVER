@@ -32,6 +32,66 @@
 
 ---
 
+## Phase 4 — 数据版本与更新闭环（2026-08-10）
+
+### 1. 本次开发了哪些内容
+
+按 `gaizao_plan.md` §7 交付「数据版本与更新闭环」6 个交付物，解决数据层四类缺陷（BM25 删除孤儿 / 跨存储删除非原子 / 无版本跟踪 / 无孤儿 GC）。用户拍板两个决策：**回滚采用"内容快照 + 重摄回滚"**（功能完整）；**rerank 保持关闭**（D6，理由见 §6）。
+
+- **D1 修复 BM25 孤儿 bug**：新增 `src/ingestion/storage/chunk_ids.py`（`chunk_id_prefix(source_path) = sha256(source_path)[:8]`），`vector_upserter._generate_chunk_id` 复用消除 hash 逻辑漂移；`document_manager.delete_document` 与 `pipeline` 的 BM25 `remove_document` 调用方改为传**路径前缀**而非内容 hash——旧代码传 64 位内容 hash，永远匹配不上存储的路径前缀 → 删除 no-op、重摄留孤儿。
+- **D2 原子跨存储删除/更新**：`ChromaStore.get_by_metadata(filter, include_embeddings)`（扫描/过滤 + 含向量，供事务捕获与 GC 复用）、`BM25Indexer.get_document_stats`（可喂回 `add_documents` 恢复）、`SQLiteIntegrityChecker.get_record`；`delete_document` 重构为事务式（捕获快照 → 依次删 Chroma/BM25/Images/History → 任一失败用快照恢复已删 store，`rolled_back=True` + 告警）；更新路径（同路径重摄）load 后查 `version_store.get_active` 判定 `is_update`，存储成功后 `_cleanup_old_version` 清理旧版本残留。
+- **D3 文档版本跟踪 + 内容快照**：新增 `src/ingestion/versioning/version_store.py`（`DocumentVersionStore`，与 `ingestion_history` 同库建 `document_versions` 表，方法：`record_success`（supersede 同路径其他 active、version_no=max+1）、`record_failure`、`list_versions`、`get_active`、`get_version`、`supersede`、`active_file_hashes`、`active_source_paths`、`save_snapshot`）；快照 best-effort 写 `data/versions/{collection}/{file_hash}/{basename}`（失败仅告警不阻断摄取）；`logical_source_path` 透传（`PdfLoader.load` / `IngestionPipeline.run` / `run_pipeline`），保证重摄旧版本时 chunk 前缀与原始文档一致。
+- **D4 按版本回滚**：`DocumentManager.rollback_document(source_path, collection, version_no)`——取目标 `{file_hash, snapshot_path}` → 事务式删除当前 active 索引数据（复用 `delete_document`）→ `run_pipeline(snapshot, force=True, logical_source_path=source_path)` 重摄 → 新 active 版本行（audit 语义，同 file_hash 可多行）。
+- **D5 孤儿 GC**：新增 `src/ingestion/storage/orphan_gc.py`（`OrphanGC.run(collection, dry_run)`），active 集合 = `ingestion_history` success 行 − ledger superseded 行（天然兼容 Phase 4 前无 ledger 的旧数据）；Chroma 按 `doc_hash ∉ active`（或缺失）删、BM25 新增 `prune(keep_prefixes)` 重建索引、Images 按 `doc_hash` 删、History 删非 active 行；新增 `scripts/gc.py`（`--collection` / `--dry-run`）。
+- **D6 rerank 处置**：不改 `config/settings.yaml` 的 `rerank.enabled`（仍 `false` / provider `none`）。
+
+### 2. 测试方法与预期效果
+
+```powershell
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_chunk_ids.py tests/unit/test_version_store.py tests/unit/test_orphan_gc.py tests/unit/test_update_cleanup.py tests/unit/test_transactional_delete.py tests/unit/test_document_manager.py tests/unit/test_rollback_document.py tests/unit/test_pipeline_progress.py tests/unit/test_chroma_get_by_metadata.py -q   # 79 passed
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit -m "not llm" -q -p no:cacheprovider    # 全量回归 1342 passed / 14 failed（均既有，无 Phase 4）
+.\.venv-3.12\Scripts\python.exe -m ruff check src/ingestion src/libs/loader src/libs/vector_store scripts/gc.py   # 新文件 0 报错；改动文件仅残留既有行债务
+.\.venv-3.12\Scripts\python.exe -m mypy --python-version 3.12 src/ingestion/versioning src/ingestion/storage src/ingestion/document_manager.py   # 0 报错（bm25_indexer:287 / image_storage:342,440 为既有）
+```
+
+端到端（离线、无 key，`--collection phase4`）：seed 7 文档 → `upd.pdf` 摄取 v1（simple 内容，1 chunk，hash `d5969d72`）→ 篡改重摄 v2（complex 内容，12 chunk，hash `10536323`，`--force`）→ 断言无孤儿（Chroma/BM25 计数 + `gc.py --dry-run` 全 0）；注入假孤儿 chunk（Chroma `orphan_*`+BM25 posting）→ 真实 GC 恰好清 1+1 → 归零；`rollback_document(upd.pdf, phase4, version_no=1)` → 新 v3 active（hash 回到 v1），Chroma 回 1 chunk，`query.py` 能检索回 v1 内容；`list_versions` 展示 v1→v2→v3 序列；`query.py --query "混合检索与向量融合"` 冒烟正常（Phase 2 的 `## 回答` 格式）。
+
+### 3. 本次改动的原因
+
+- **BM25 孤儿根因**：文档身份三方不一致——`file_hash`（内容 SHA-256，history PK / Chroma `doc_hash`）、chunk-id 前缀（`sha256(路径)[:8]`）、`document.id`（`doc_{内容[:16]}`）。`remove_document` 的调用方都传内容 hash，而存储前缀是路径 hash → 永远匹配不上 → 重摄留孤儿。
+- **删除非原子**：`delete_document` 依次删各 store，中途失败会产生半删状态。
+- **无版本跟踪**：更新覆盖旧数据，无法回滚、无审计。
+- **无孤儿清理**：残留数据只能人工排查。
+- **Phase 4 方案**：统一路径前缀 + 事务式删除 + 版本 ledger/快照 + 重摄回滚 + 惰性 GC。
+
+### 4. 重点难点
+
+- **e2e 验证中发现并修复 3 个真实 bug**：
+  1. **`ChromaStore.get_by_metadata` numpy 崩溃**——chromadb 1.x 的 `collection.get(include=["embeddings"])` 返回 **numpy 2-D 数组**，`if embeddings and ...` 对 >1 行的数组做 `bool()` 抛"truth value ambiguous"；这是首个 `where`+embeddings 组合路径（事务捕获），改 `is not None` 判断并把向量 `tolist()`（可 JSON 化）。
+  2. **`delete_document` 按 hash 误删**——`delete_by_metadata({"doc_hash": h})` 会删掉**其他路径**上字节相同文档的 chunk；改为 `$and: [{source_path}, {doc_hash}]` 路径+哈希双约束（与 `_cleanup_old_version`、GC 的 (path,hash) 对语义一致），捕获快照同步同域。
+  3. **回滚后 history 的 `file_path` 指向快照目录**——重摄时 `mark_success(file_hash, resolved_path)` 记录的是 `data/versions/.../upd.pdf` 而非逻辑路径，破坏 `_hash_from_path` 与 GC 前缀回退；改 `mark_success`/`mark_failed` 记录 `source_path_for_versioning`（逻辑路径）。
+- **chromadb 1.5.9 的 where 语法**：扁平多键 dict 报 "expected exactly one operator"，`{"$and": [...]}` 才生效；`_build_where_clause` 对 list 值原样透传。
+- **路径归一化**：loader 解析为绝对路径，而 ledger/history 早期存原始相对路径 → 键不一致；pipeline `run()` 统一 `resolve()`，rollback/delete 侧同样 `resolve()` 对齐。
+- **GC active 集**：文档是 (path,hash) 对，同一内容 hash 可多路径 active（`--force` 场景）；`get_active_by_hash` 每 hash 只返回一行会漏，改为 `active_source_paths()` 取全部 active 路径 + history 回退。
+- **快照 best-effort**：写快照失败绝不阻断摄取；回滚依赖快照存在（缺失时返回明确错误结果）。
+- **旧数据兼容**：GC 的 active = history − ledger superseded，Phase 4 前无 ledger 数据永不误删。
+
+### 5. 你应该学到什么
+
+- **文档身份必须三处一致**（内容 hash / chunk 前缀 / doc id），改存储键逻辑前先画清"谁在用什么键"。
+- **跨存储操作要么捕获快照事务化，要么让 GC 兜底收敛**；本方案两者都做（事务回滚 + 惰性 GC）。
+- **numpy 数组的 `bool()` 语义**是 Python 库的常见暗雷（`if ndarray` 对多元素抛错），涉及库返回值一律用 `is not None` / `len()`。
+- **"回滚"用"快照 + 重摄"实现**的价值：不动存储 schema，靠幂等 upsert + 确定性 chunk-id 收敛，audit 天然保留（同内容可多次出现在 ledger）。
+- **版本 ledger 与 ingestion history 同库同真**，避免两套 SQLite 漂移。
+
+### 6. 验证结果与遗留事项
+
+- **真实数字**：Phase 4 单测 **79 passed**（9 个测试文件）；全量 `tests/unit -m "not llm"` **1342 passed / 14 failed / 1 skipped**（14 个失败均为既有：embedding-provider env 模拟、计时类、sparse_encoder 分词、list_collections、pdf 图片结构，与 Phase 4 无关）；ruff 新文件 0 报错、改动文件新增行 0 报错；mypy 0 报错（4 个既有错误在 bm25_indexer:287 / image_storage:342,440）。
+- **e2e 数字**：seed 7 文档；更新收敛（v1:1 chunk → v2:12 chunk，旧版本 Chroma 残留 0、BM25 残留 0、GC dry-run 全 0）；注入孤儿后 GC 真实清除 1 Chroma + 1 BM25 posting → 全 0；回滚后 Chroma 总数 85→74（−12 v2 +1 v1）、`list_versions` 显示 v1/v2/v3、history `file_path` = 逻辑路径、GC active=8 全 0、`query.py` 检索回 v1 内容。
+- **遗留事项**：`main.py`/`mcp-server` 仍是 stub（Phase E）；`golden_test_set.json` 的 chunk 级 id 仍空（源级为主，设计如此）；**真实 API key 仍在 git 历史，需用户轮换**；回滚依赖快照存在（Phase 4 前旧数据无快照不可回滚）；rerank 保持关闭——Phase 3 ablation 的 `hybrid_rerank` 从未真正重排（config_snapshot 显示 rerank 禁用），无收益证据，待真实 rerank 评测后再开。
+
+---
+
 ## Phase 3 — 评测闭环（2026-08-10）
 
 ### 1. 本次开发了哪些内容

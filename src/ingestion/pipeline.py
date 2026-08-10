@@ -42,6 +42,8 @@ from src.ingestion.embedding.batch_processor import BatchProcessor
 from src.ingestion.storage.bm25_indexer import BM25Indexer
 from src.ingestion.storage.vector_upserter import VectorUpserter
 from src.ingestion.storage.image_storage import ImageStorage
+from src.ingestion.storage.chunk_ids import chunk_id_prefix
+from src.ingestion.versioning import DocumentVersionStore
 
 logger = get_logger(__name__)
 
@@ -140,7 +142,15 @@ class IngestionPipeline:
         # Stage 1: File Integrity
         self.integrity_checker = SQLiteIntegrityChecker(db_path=str(resolve_path("data/db/ingestion_history.db")))
         logger.info("  ✓ FileIntegrityChecker initialized")
-        
+
+        # Phase 4: document version ledger + content snapshots (best-effort)
+        self.version_store = None
+        try:
+            self.version_store = DocumentVersionStore(db_path=str(self.integrity_checker.db_path))
+            logger.info("  ✓ DocumentVersionStore initialized")
+        except Exception as e:
+            logger.warning(f"  ✗ DocumentVersionStore unavailable (versioning disabled): {e}")
+
         # Stage 2: Loader
         self.loader = PdfLoader(
             extract_images=True,
@@ -199,6 +209,7 @@ class IngestionPipeline:
         file_path: str,
         trace: Optional[TraceContext] = None,
         on_progress: Optional[Callable[[str, int, int], None]] = None,
+        logical_source_path: str | None = None,
     ) -> PipelineResult:
         """Execute the full ingestion pipeline on a file.
         
@@ -216,6 +227,22 @@ class IngestionPipeline:
         file_path = Path(file_path)
         stages: Dict[str, Any] = {}
         _total_stages = 6
+
+        # The storage layers resolve the path to absolute (the loader uses
+        # ``Path.resolve()`` when building ``metadata["source_path"]``), so the
+        # chunk-id prefix, Chroma metadata and BM25 postings are all keyed on
+        # the *resolved* path.  Keep a resolved form for every identity the
+        # version ledger and cleanup touch so they agree with the stores.
+        resolved_path = str(file_path.resolve())
+        if logical_source_path is not None:
+            logical_source_path = str(Path(logical_source_path).resolve())
+
+        # Phase 4 versioning (best-effort; fake-self tests and stores without a
+        # ledger fall back to plain ingestion).
+        vs = getattr(self, "version_store", None)
+        source_path_for_versioning = logical_source_path if logical_source_path else resolved_path
+        versioning: dict[str, Any] = {"is_update": False, "old_hash": None}
+        snapshot_path: str | None = None
 
         def _notify(stage_name: str, step: int) -> None:
             if on_progress is not None:
@@ -255,9 +282,27 @@ class IngestionPipeline:
             _notify("load", 2)
             
             _t0 = time.monotonic()
-            document = self.loader.load(str(file_path))
+            document = self.loader.load(resolved_path, logical_source_path=logical_source_path)
             _elapsed = (time.monotonic() - _t0) * 1000.0
-            
+
+            # Phase 4: versioning pre-check + content snapshot (best-effort)
+            if vs is not None:
+                try:
+                    active = vs.get_active(source_path_for_versioning, self.collection)
+                    if active and active["file_hash"] != file_hash:
+                        versioning["is_update"] = True
+                        versioning["old_hash"] = active["file_hash"]
+                except Exception as e:
+                    logger.warning(f"Version pre-check skipped for {file_path}: {e}")
+                try:
+                    snapshot_path = vs.save_snapshot(
+                        source_path_for_versioning, self.collection, file_hash, str(file_path)
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Snapshot save failed for {file_path} (rollback unavailable): {e}"
+                    )
+
             text_preview = document.text[:200].replace('\n', ' ') + "..." if len(document.text) > 200 else document.text
             image_count = len(document.metadata.get("images", []))
             
@@ -444,11 +489,14 @@ class IngestionPipeline:
                 stat["chunk_id"] = vid
 
             # 6b: BM25 Index
+            # doc_id is the chunk-id prefix (sha256 of source_path[:8]) so
+            # add_documents' remove-before-rebuild drops the previous version's
+            # postings for this document (Phase 4 orphan fix).
             logger.info("  6b. BM25 Index...")
             self.bm25_indexer.add_documents(
                 sparse_stats,
                 collection=self.collection,
-                doc_id=document.id,
+                doc_id=chunk_id_prefix(document.metadata["source_path"]),
                 trace=trace,
             )
             logger.info(f"      Index built for {len(sparse_stats)} documents")
@@ -520,8 +568,27 @@ class IngestionPipeline:
             # ─────────────────────────────────────────────────────────────
             # Mark Success
             # ─────────────────────────────────────────────────────────────
-            self.integrity_checker.mark_success(file_hash, str(file_path), self.collection)
-            
+            # Record the *logical* path (the one chunks are keyed under) so
+            # history agrees with the ledger and GC/delete lookups.  For normal
+            # ingests this equals resolved_path; for rollback re-ingests it is
+            # the original document path, not the snapshot's location.
+            self.integrity_checker.mark_success(
+                file_hash, source_path_for_versioning, self.collection
+            )
+
+            # Phase 4: record active version + clean residual of superseded one
+            if vs is not None:
+                try:
+                    vs.record_success(
+                        source_path_for_versioning, self.collection, file_hash, snapshot_path
+                    )
+                    if versioning["is_update"]:
+                        self._cleanup_old_version(
+                            source_path_for_versioning, versioning["old_hash"], self.collection
+                        )
+                except Exception as e:
+                    logger.warning(f"Version recording failed for {file_path}: {e}")
+
             logger.info("\n" + "=" * 60)
             logger.info("✅ Pipeline completed successfully!")
             logger.info(f"   Chunks: {len(chunks)}")
@@ -541,8 +608,19 @@ class IngestionPipeline:
             
         except Exception as e:
             logger.error(f"❌ Pipeline failed: {e}", exc_info=True)
-            self.integrity_checker.mark_failed(file_hash, str(file_path), str(e))
-            
+            self.integrity_checker.mark_failed(
+                file_hash, source_path_for_versioning, str(e)
+            )
+
+            # Phase 4: record the failure in the version ledger (best-effort)
+            if vs is not None and "file_hash" in locals():
+                try:
+                    vs.record_failure(
+                        source_path_for_versioning, self.collection, file_hash, str(e)
+                    )
+                except Exception as ve:
+                    logger.warning(f"Version failure recording failed: {ve}")
+
             return PipelineResult(
                 success=False,
                 file_path=str(file_path),
@@ -551,6 +629,52 @@ class IngestionPipeline:
                 stages=stages
             )
     
+    def _cleanup_old_version(
+        self, source_path: str, old_hash: str, collection: str | None = None
+    ) -> None:
+        """Remove residual data of a superseded version after a successful update.
+
+        BM25 needs no action here — the ``doc_id`` prefix-remove inside
+        ``add_documents`` (stage 6b) already dropped the previous version's
+        postings.  Anything that fails is left for orphan GC.
+
+        Chroma deletion is scoped to ``(source_path, doc_hash)``: the same
+        content hash can legitimately live at several paths (a file ingested
+        twice, or two byte-identical documents), so we must never delete
+        another path's chunks.  Images and the ingestion-history row are keyed
+        by ``doc_hash`` alone, so they are only touched when the old hash is
+        *fully superseded* (no active ledger row anywhere) — otherwise another
+        path still references them.
+        """
+        coll = collection or self.collection
+        try:
+            where = {"$and": [{"source_path": source_path}, {"doc_hash": old_hash}]}
+            self.vector_upserter.vector_store.delete_by_metadata(where)
+        except Exception as e:
+            logger.warning(f"Old-version Chroma cleanup failed for {old_hash}: {e}")
+
+        vs = getattr(self, "version_store", None)
+        fully_superseded = False
+        if vs is not None:
+            try:
+                fully_superseded = old_hash not in vs.active_file_hashes(coll)
+            except Exception as e:
+                logger.warning(f"Version lookup failed during cleanup for {old_hash}: {e}")
+                fully_superseded = False  # conservative: keep images/history
+
+        if not fully_superseded:
+            return
+
+        try:
+            for img in self.image_storage.list_images(doc_hash=old_hash):
+                self.image_storage.delete_image(img["image_id"])
+        except Exception as e:
+            logger.warning(f"Old-version image cleanup failed for {old_hash}: {e}")
+        try:
+            self.integrity_checker.remove_record(old_hash)
+        except Exception as e:
+            logger.warning(f"Old-version history cleanup failed for {old_hash}: {e}")
+
     def close(self) -> None:
         """Clean up resources."""
         self.image_storage.close()
@@ -560,23 +684,26 @@ def run_pipeline(
     file_path: str,
     settings_path: Optional[str] = None,
     collection: str = "default",
-    force: bool = False
+    force: bool = False,
+    logical_source_path: str | None = None
 ) -> PipelineResult:
     """Convenience function to run the pipeline.
-    
+
     Args:
         file_path: Path to file to process
         settings_path: Path to settings.yaml (default: <repo>/config/settings.yaml)
         collection: Collection name
         force: Force reprocessing
-    
+        logical_source_path: Optional logical path used as the chunk-id prefix
+            source (Phase 4 rollback).
+
     Returns:
         PipelineResult with execution details
     """
     settings = load_settings(settings_path)
     pipeline = IngestionPipeline(settings, collection=collection, force=force)
-    
+
     try:
-        return pipeline.run(file_path)
+        return pipeline.run(file_path, logical_source_path=logical_source_path)
     finally:
         pipeline.close()

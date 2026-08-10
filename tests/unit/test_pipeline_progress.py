@@ -135,3 +135,18 @@ class TestPipelineProgressCallback:
         stage_names = [c[0] for c in calls]
         expected_order = ["integrity", "load", "split", "transform", "embed", "upsert"]
         assert stage_names == expected_order
+
+    def test_mark_success_uses_logical_source_path(self) -> None:
+        """Rollback re-ingests record the *logical* path, not the snapshot's."""
+        from pathlib import Path
+
+        fp = _make_fake_pipeline()
+        result = IngestionPipeline.run(
+            fp, "snapshot_physical.pdf", logical_source_path="docs/original.pdf"
+        )
+        assert result.success
+        fp.integrity_checker.mark_success.assert_called_once()
+        recorded_path = fp.integrity_checker.mark_success.call_args[0][1]
+        assert recorded_path == str(Path("docs/original.pdf").resolve())
+        # Must NOT be the physical (snapshot) location
+        assert recorded_path != str(Path("snapshot_physical.pdf").resolve())

@@ -373,8 +373,12 @@ class BM25Indexer:
         and re-saves the index.
 
         Args:
-            doc_id: Document identifier (or prefix).  All postings whose
-                ``chunk_id`` starts with this value are removed.
+            doc_id: Document identifier — the chunk-id **prefix** (i.e.
+                :func:`chunk_id_prefix(source_path)`), NOT the content hash.
+                All postings whose ``chunk_id`` starts with this value are
+                removed.  Passing a content hash (which never prefixes the
+                stored path-hash chunk IDs) silently removes nothing — the
+                pre-Phase-4 orphan bug.
             collection: Collection name.
 
         Returns:
@@ -406,32 +410,126 @@ class BM25Indexer:
             del self._index[term]
 
         if removed_any:
-            # Recalculate global metadata
-            all_chunk_ids: set[str] = set()
-            total_length = 0
-            for td in self._index.values():
-                for p in td["postings"]:
-                    all_chunk_ids.add(p["chunk_id"])
-                    total_length += p["doc_length"]
-
-            num_docs = len(all_chunk_ids)
-            avg_doc_length = total_length / num_docs if num_docs else 0.0
-
-            # Recalculate IDF values
-            for td in self._index.values():
-                td["idf"] = self._calculate_idf(num_docs, td["df"])
-
-            self._metadata = {
-                "num_docs": num_docs,
-                "avg_doc_length": avg_doc_length,
-                "total_terms": len(self._index),
-                "collection": collection,
-            }
-            self._save(collection)
+            self._finalize_removal(collection)
 
         return removed_any
-    
+
+    def get_document_stats(
+        self,
+        doc_id: str,
+        collection: str = "default",
+    ) -> list[dict[str, Any]]:
+        """Return term-stat entries for postings whose chunk_id starts with *doc_id*.
+
+        The returned list is shaped exactly like ``SparseEncoder`` output and can
+        be fed back into :meth:`add_documents` to restore a document's sparse
+        postings (e.g. as part of a transactional rollback).
+
+        Args:
+            doc_id: Chunk-id prefix (see :meth:`remove_document`).
+            collection: Collection name.
+
+        Returns:
+            List of ``{chunk_id, term_frequencies, doc_length}`` dicts.
+        """
+        if not self._index:
+            self.load(collection)
+
+        stats: dict[str, dict[str, Any]] = {}
+        for term, term_data in self._index.items():
+            for posting in term_data["postings"]:
+                if not posting["chunk_id"].startswith(doc_id):
+                    continue
+                cid = posting["chunk_id"]
+                if cid not in stats:
+                    stats[cid] = {
+                        "chunk_id": cid,
+                        "term_frequencies": {},
+                        "doc_length": posting["doc_length"],
+                    }
+                stats[cid]["term_frequencies"][term] = posting["tf"]
+
+        return list(stats.values())
+
+    def prune(
+        self,
+        keep_prefixes: set[str],
+        collection: str = "default",
+        dry_run: bool = False,
+    ) -> int:
+        """Remove postings whose chunk-id prefix is not in *keep_prefixes*.
+
+        Used by orphan GC to drop chunks that no longer belong to an active
+        ingestion-history record.
+
+        Args:
+            keep_prefixes: Set of chunk-id prefixes whose postings are kept.
+            collection: Collection name.
+            dry_run: If ``True``, count what would be removed without mutating
+                the index.
+
+        Returns:
+            Number of postings removed (or that would be removed in dry-run).
+        """
+        if not self._index:
+            if not self.load(collection):
+                return 0
+
+        if not keep_prefixes:
+            total = sum(len(td["postings"]) for td in self._index.values())
+            if not dry_run and total:
+                self._index.clear()
+                self._finalize_removal(collection)
+            return total
+
+        removed = 0
+        terms_to_delete: list[str] = []
+        for term, term_data in self._index.items():
+            kept = [
+                p for p in term_data["postings"]
+                if any(p["chunk_id"].startswith(prefix) for prefix in keep_prefixes)
+            ]
+            removed += len(term_data["postings"]) - len(kept)
+            if dry_run:
+                continue
+            term_data["postings"] = kept
+            if not kept:
+                terms_to_delete.append(term)
+            else:
+                term_data["df"] = len(kept)
+
+        if removed and not dry_run:
+            for term in terms_to_delete:
+                del self._index[term]
+            self._finalize_removal(collection)
+
+        return removed
+
     # ===== Private Helper Methods =====
+
+    def _finalize_removal(self, collection: str) -> None:
+        """Recalculate stats/metadata and persist after postings were removed."""
+        all_chunk_ids: set[str] = set()
+        total_length = 0
+        for td in self._index.values():
+            for p in td["postings"]:
+                all_chunk_ids.add(p["chunk_id"])
+                total_length += p["doc_length"]
+
+        num_docs = len(all_chunk_ids)
+        avg_doc_length = total_length / num_docs if num_docs else 0.0
+
+        # Recalculate IDF values
+        for td in self._index.values():
+            td["idf"] = self._calculate_idf(num_docs, td["df"])
+
+        self._metadata = {
+            "num_docs": num_docs,
+            "avg_doc_length": avg_doc_length,
+            "total_terms": len(self._index),
+            "collection": collection,
+        }
+        self._save(collection)
     
     def _calculate_idf(self, num_docs: int, df: int) -> float:
         """Calculate IDF using BM25 formula.

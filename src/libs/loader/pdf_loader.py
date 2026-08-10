@@ -76,15 +76,24 @@ class PdfLoader(BaseLoader):
         self.image_storage_dir = Path(image_storage_dir)
         self._markitdown = MarkItDown()
     
-    def load(self, file_path: str | Path) -> Document:
+    def load(
+        self,
+        file_path: str | Path,
+        logical_source_path: str | Path | None = None,
+    ) -> Document:
         """Load and parse a PDF file.
-        
+
         Args:
             file_path: Path to the PDF file.
-            
+            logical_source_path: Optional *logical* path used for the chunk-id
+                prefix (stored in ``metadata["source_path"]``).  Defaults to
+                *file_path*.  Phase 4 rollback passes the original document
+                path here so re-ingested snapshots keep the same chunk IDs as
+                the document they restore.
+
         Returns:
             Document with Markdown text and metadata.
-            
+
         Raises:
             FileNotFoundError: If the PDF file doesn't exist.
             ValueError: If the file is not a valid PDF.
@@ -94,11 +103,11 @@ class PdfLoader(BaseLoader):
         path = self._validate_file(file_path)
         if path.suffix.lower() != '.pdf':
             raise ValueError(f"File is not a PDF: {path}")
-        
+
         # Compute document hash for unique ID and image directory
         doc_hash = self._compute_file_hash(path)
         doc_id = f"doc_{doc_hash[:16]}"
-        
+
         # Parse PDF with MarkItDown
         try:
             result = self._markitdown.convert(str(path))
@@ -106,10 +115,11 @@ class PdfLoader(BaseLoader):
         except Exception as e:
             logger.error(f"Failed to parse PDF {path}: {e}")
             raise RuntimeError(f"PDF parsing failed: {e}") from e
-        
+
         # Initialize metadata
+        source_path = str(logical_source_path) if logical_source_path else str(path)
         metadata: Dict[str, Any] = {
-            "source_path": str(path),
+            "source_path": source_path,
             "doc_type": "pdf",
             "doc_hash": doc_hash,
         }

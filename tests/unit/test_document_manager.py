@@ -173,6 +173,18 @@ class TestFileIntegrityEnhancements:
         checker.remove_record("h1")
         assert checker.should_skip("h1") is False
 
+    def test_get_record_existing(self, checker):
+        checker.mark_success("h1", "/a.pdf", collection="col1")
+        rec = checker.get_record("h1")
+        assert rec is not None
+        assert rec["file_hash"] == "h1"
+        assert rec["file_path"] == "/a.pdf"
+        assert rec["collection"] == "col1"
+        assert rec["status"] == "success"
+
+    def test_get_record_missing(self, checker):
+        assert checker.get_record("no_such_hash") is None
+
 
 # =====================================================================
 # DocumentManager tests (using mocks)
@@ -308,12 +320,13 @@ class TestDocumentManagerDelete:
         mgr.bm25.remove_document.assert_called_once()
         mgr.integrity.remove_record.assert_called_once()
 
-    def test_delete_file_missing_falls_back_to_integrity(self):
+    def test_delete_file_missing_falls_back_to_integrity(self, tmp_path):
+        missing = str(tmp_path / "missing.pdf")
         mgr = _make_manager(
             integrity_records=[
                 {
                     "file_hash": "xyz789",
-                    "file_path": "/gone/missing.pdf",
+                    "file_path": missing,
                     "collection": "default",
                     "processed_at": "2025-01-01",
                     "updated_at": "2025-01-01",
@@ -321,7 +334,7 @@ class TestDocumentManagerDelete:
             ],
         )
         mgr.integrity.compute_sha256.side_effect = FileNotFoundError("gone")
-        result = mgr.delete_document("/gone/missing.pdf", "default")
+        result = mgr.delete_document(missing, "default")
         # Should fall back to _hash_from_path
         assert result.success is True or len(result.errors) == 0 or True
         mgr.chroma.delete_by_metadata.assert_called_once()

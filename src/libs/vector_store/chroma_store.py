@@ -375,7 +375,71 @@ class ChromaStore(BaseVectorStore):
             raise RuntimeError(
                 f"Failed to delete by metadata {filter_dict}: {e}"
             ) from e
-    
+
+    def get_by_metadata(
+        self,
+        filter_dict: dict[str, Any] | None = None,
+        include_embeddings: bool = True,
+        trace: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve full records matching a metadata filter (or the whole collection).
+
+        Used by Phase 4 transactional delete (capture → rollback) and by orphan
+        GC.
+
+        Args:
+            filter_dict: Metadata key/value pairs to match.  When ``None`` or
+                empty, every record in the collection is returned.
+            include_embeddings: Include the stored ``embedding`` vector per
+                record.  Needed to restore records on rollback; set ``False``
+                for GC scans to avoid pulling vectors into memory.
+            trace: Optional TraceContext for observability.
+
+        Returns:
+            List of records, each ``{"id", "text", "metadata", "embedding"}``
+            (``embedding`` omitted when ``include_embeddings=False``).
+
+        Raises:
+            RuntimeError: If the retrieval operation fails.
+        """
+        include = ["metadatas", "documents"]
+        if include_embeddings:
+            include.append("embeddings")
+
+        try:
+            where = None
+            if filter_dict:
+                where = self._build_where_clause(filter_dict)
+            results = self.collection.get(where=where, include=include)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to get records by metadata {filter_dict}: {e}"
+            ) from e
+
+        records: list[dict[str, Any]] = []
+        if results and results.get('ids'):
+            ids = results['ids']
+            documents = results.get('documents', [None] * len(ids))
+            metadatas = results.get('metadatas', [{}] * len(ids))
+            embeddings = results.get('embeddings', [None] * len(ids))
+
+            for i, record_id in enumerate(ids):
+                record: dict[str, Any] = {
+                    'id': record_id,
+                    'text': documents[i] if documents and documents[i] else '',
+                    'metadata': metadatas[i] if metadatas and metadatas[i] else {},
+                }
+                # ``embeddings`` is a numpy 2-D array in chromadb 1.x, so it
+                # must be tested with ``is not None`` — `bool()` on an array
+                # with more than one row raises "truth value ambiguous".
+                if include_embeddings and embeddings is not None and embeddings[i] is not None:
+                    emb = embeddings[i]
+                    record['embedding'] = emb.tolist() if hasattr(emb, 'tolist') else emb
+                records.append(record)
+
+        logger.debug(f"get_by_metadata returned {len(records)} records")
+        return records
+
     def _sanitize_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Sanitize metadata to ensure ChromaDB compatibility.
         

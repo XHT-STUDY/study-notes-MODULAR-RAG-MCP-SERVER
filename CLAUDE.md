@@ -92,12 +92,12 @@ python scripts/start_dashboard.py --port 8501
 
 ## 已知问题与进行中改造
 
-- **`gaizao_plan.md` 是当前改造方案（Phase 0–6，Phase 0–1 已完成，2–6 规划中），改代码前先读它**。已确认的问题：
+- **`gaizao_plan.md` 是当前改造方案（Phase 0–6，Phase 0–4 已完成，5–6 规划中），改代码前先读它**。已确认的问题：
   - 真实 API key 曾提交进 `config/settings.yaml` —— **Phase 0 已实施**（环境变量优先 + 模板化 + gitignore + 停止跟踪，见 `DEVELOPMENT_LOG.md`）；key 仍在 git 历史，需用户轮换。
   - 依赖 `>=` 无锁、环境不可复现 —— **Phase 1 已实施**（`.python-version` 3.12 + `uv.lock` + `scripts/bootstrap.py` + 一键引导，见 `DEVELOPMENT_LOG.md`）。全新环境：`.\bootstrap.bat --seed`。
   - `main.py` / `mcp-server` 控制台脚本是 stub（Phase E 内容缺失）。
   - `tests/fixtures/golden_test_set.json` 的 `expected_chunk_ids`/`expected_sources` 为空，导致 hit_rate/mrr 恒为 0。
-  - BM25 `remove_document` 存在孤儿分块 bug（内容哈希与前缀不匹配）。
+  - **Phase 4 已实施**（数据版本与更新闭环，见 `DEVELOPMENT_LOG.md`）：修复 BM25 `remove_document` 孤儿 bug（chunk-id 前缀统一为 `sha256(source_path)[:8]`）；跨存储删除改为事务式（捕获快照 → 失败回滚）；新增 `DocumentVersionStore`（`data/db/ingestion_history.db` 同库 `document_versions` 表 + `data/versions/{collection}/{file_hash}/` 内容快照）、`rollback_document`（快照重摄回滚）、`OrphanGC`（`scripts/gc.py --collection X --dry-run`）；rerank 保持关闭。
 - 重要文档：`ARCHITECTURE.md`（架构详解）、`DEV_SPEC.md`（224KB 开发规范，含测试策略 §4）、`README.md`、`RESUME.md`。
 - 无 CI 配置（计划 Phase 5 增加 GitHub Actions）。
 

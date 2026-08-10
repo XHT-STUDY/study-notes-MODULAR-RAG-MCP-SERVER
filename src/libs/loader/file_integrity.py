@@ -396,6 +396,30 @@ class SQLiteIntegrityChecker(FileIntegrityChecker):
         finally:
             conn.close()
 
+    def get_record(self, file_hash: str) -> dict[str, Any] | None:
+        """Fetch a single ingestion-history record by file hash.
+
+        Args:
+            file_hash: SHA256 hash of the file.
+
+        Returns:
+            Dict with keys file_hash, file_path, status, collection,
+            error_msg, processed_at, updated_at; or None if not found.
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT file_hash, file_path, status, collection, error_msg, "
+                "processed_at, updated_at "
+                "FROM ingestion_history WHERE file_hash = ?",
+                (file_hash,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
     def list_processed(
         self, collection: Optional[str] = None
     ) -> List[Dict[str, Any]]:
