@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -79,6 +80,11 @@ class EvalReport:
         total_elapsed_ms: Total time for the entire evaluation.
         evaluator_name: Name of the evaluator used.
         test_set_path: Path to the golden test set file.
+        run_id: Short unique id for this run (e.g. 8-char uuid hex).
+        timestamp: Local timestamp of when the run started.
+        collection: Collection name the run searched (default "default").
+        variant: Ablation variant label (empty for a plain run).
+        config_snapshot: Key retrieval/evaluation settings captured at run time.
     """
 
     query_results: List[QueryResult] = field(default_factory=list)
@@ -86,10 +92,15 @@ class EvalReport:
     total_elapsed_ms: float = 0.0
     evaluator_name: str = ""
     test_set_path: str = ""
+    run_id: str = ""
+    timestamp: str = ""
+    collection: str = ""
+    variant: str = ""
+    config_snapshot: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Serialise report to dictionary."""
-        return {
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise report to dictionary (empty metadata keys are omitted)."""
+        data: dict[str, Any] = {
             "evaluator_name": self.evaluator_name,
             "test_set_path": self.test_set_path,
             "total_elapsed_ms": round(self.total_elapsed_ms, 1),
@@ -108,6 +119,13 @@ class EvalReport:
                 for qr in self.query_results
             ],
         }
+        for key in ("run_id", "timestamp", "collection", "variant"):
+            value = getattr(self, key)
+            if value:
+                data[key] = value
+        if self.config_snapshot:
+            data["config_snapshot"] = self.config_snapshot
+        return data
 
 
 def load_test_set(path: str | Path) -> List[GoldenTestCase]:
@@ -222,9 +240,16 @@ class EvalRunner:
             type(self.evaluator).__name__,
         )
 
+        target_collection = collection or "default"
         report = EvalReport(
             evaluator_name=type(self.evaluator).__name__,
             test_set_path=str(test_set_path),
+            run_id=uuid.uuid4().hex[:8],
+            timestamp=time.strftime("%Y-%m-%d %H:%M:%S"),
+            collection=target_collection,
+            config_snapshot=self._build_config_snapshot(
+                collection=target_collection, top_k=top_k,
+            ),
         )
 
         t0 = time.monotonic()
@@ -285,12 +310,14 @@ class EvalRunner:
             answer = self._generate_answer(test_case.query, retrieved_chunks)
         qr.generated_answer = answer
 
-        # Step 3: Build ground truth
-        ground_truth = (
-            {"ids": test_case.expected_chunk_ids}
-            if test_case.expected_chunk_ids
-            else None
-        )
+        # Step 3: Build ground truth — always forward the full structure so
+        # chunk-level (ids), source-level (sources) and reference-answer signals
+        # all reach the evaluator (Phase 3).
+        ground_truth = {
+            "ids": test_case.expected_chunk_ids,
+            "sources": test_case.expected_sources,
+            "reference": test_case.reference_answer,
+        }
 
         # Step 4: Evaluate
         try:
@@ -368,6 +395,53 @@ class EvalRunner:
                 texts.append(str(c))
 
         return " ".join(texts[:5])  # first 5 chunks
+
+    def _build_config_snapshot(self, collection: str, top_k: int) -> dict[str, Any]:
+        """Capture the retrieval/eval configuration that produced this run."""
+        snapshot: dict[str, Any] = {"collection": collection, "top_k": top_k}
+
+        s = self.settings
+        if s is None:
+            return snapshot
+
+        llm = getattr(s, "llm", None)
+        if llm is not None:
+            snapshot["llm"] = {
+                "provider": getattr(llm, "provider", ""),
+                "model": getattr(llm, "model", ""),
+            }
+        embedding = getattr(s, "embedding", None)
+        if embedding is not None:
+            snapshot["embedding"] = {
+                "provider": getattr(embedding, "provider", ""),
+                "model": getattr(embedding, "model", ""),
+            }
+        retrieval = getattr(s, "retrieval", None)
+        if retrieval is not None:
+            snapshot["retrieval"] = {
+                "dense_top_k": getattr(retrieval, "dense_top_k", None),
+                "sparse_top_k": getattr(retrieval, "sparse_top_k", None),
+                "fusion_top_k": getattr(retrieval, "fusion_top_k", None),
+            }
+        rerank = getattr(s, "rerank", None)
+        if rerank is not None:
+            rerank_enabled = bool(getattr(rerank, "enabled", False))
+            snapshot["rerank"] = {
+                "enabled": rerank_enabled,
+                "provider": getattr(rerank, "provider", ""),
+            }
+        evaluation = getattr(s, "evaluation", None)
+        if evaluation is not None:
+            snapshot["evaluation"] = {
+                "provider": getattr(evaluation, "provider", ""),
+                "metrics": list(getattr(evaluation, "metrics", [])),
+            }
+
+        # Reflect whether a reranker was actually applied in this run.
+        if self.reranker is not None and getattr(self.reranker, "is_enabled", False):
+            snapshot.setdefault("rerank", {})["applied"] = True
+
+        return snapshot
 
     def _get_chunk_id(self, chunk: Any) -> str:
         """Extract chunk ID from various representations."""

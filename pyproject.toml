@@ -35,6 +35,9 @@ dependencies = [
     "streamlit>=1.30.0",
     "ragas>=0.1.0",
     "datasets>=2.0.0",
+    # ragas 0.4.3 在 ragas/llms/base.py 导入 langchain_community.chat_models.vertexai，
+    # 而 langchain-community>=0.4.2 移除了该模块（ragas issue #2745）——固定在 0.4.2 之前，避免 import ragas 崩溃。
+    "langchain-community>=0.3.0,<0.4.2",
 ]
 
 [project.optional-dependencies]

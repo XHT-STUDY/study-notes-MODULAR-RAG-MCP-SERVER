@@ -189,7 +189,10 @@ class CompositeEvaluator(BaseEvaluator):
         if settings is None:
             return []
 
-        evaluation = getattr(settings, "evaluation", None)
+        evaluation: Any = getattr(settings, "evaluation", None)
+        if evaluation is None and hasattr(settings, "provider"):
+            # A bare EvaluationSettings may be passed directly.
+            evaluation = settings
         if evaluation is None:
             return []
 
@@ -197,7 +200,25 @@ class CompositeEvaluator(BaseEvaluator):
         if not backends:
             return []
 
+        from dataclasses import is_dataclass
+        from dataclasses import replace as dc_replace
+
+        from src.core.settings import EvaluationSettings
         from src.libs.evaluator.evaluator_factory import EvaluatorFactory
+
+        # Non-dataclass settings (duck-typed / test doubles) cannot be passed to
+        # dataclasses.replace() — coerce to a real EvaluationSettings first so
+        # the replace-based per-backend derivation stays uniform.
+        if not is_dataclass(evaluation):
+            raw_metrics = getattr(evaluation, "metrics", None)
+            if not isinstance(raw_metrics, (list, tuple)):
+                raw_metrics = []
+            evaluation = EvaluationSettings(
+                enabled=bool(getattr(evaluation, "enabled", True)),
+                provider=str(getattr(evaluation, "provider", "")),
+                metrics=[str(m) for m in raw_metrics],
+                backends=[str(b) for b in backends],
+            )
 
         evaluators: List[BaseEvaluator] = []
         for backend_name in backends:
@@ -206,16 +227,21 @@ class CompositeEvaluator(BaseEvaluator):
                 continue  # avoid infinite recursion / no-ops
 
             try:
-                # Create a mock settings with provider overridden
-                from unittest.mock import MagicMock
-
-                sub_settings = MagicMock(wraps=settings)
-                sub_eval = MagicMock()
-                sub_eval.enabled = True
-                sub_eval.provider = backend_name
-                sub_eval.metrics = getattr(evaluation, "metrics", [])
-                sub_eval.backends = []  # prevent recursion
-                sub_settings.evaluation = sub_eval
+                # Build a real sub-config via dataclasses.replace: only the
+                # provider changes; metrics/backends stay coherent.  This
+                # replaces the fragile MagicMock approach (real Settings is a
+                # frozen dataclass, and replace() works on frozen dataclasses).
+                sub_eval = dc_replace(
+                    evaluation, provider=backend_name, backends=[]
+                )
+                if is_dataclass(settings) and hasattr(settings, "evaluation"):
+                    # is_dataclass() narrows to a DataclassInstance union that
+                    # dataclasses.replace() can't bind its type-var to — feed it
+                    # through an Any-typed alias instead.
+                    settings_any: Any = settings
+                    sub_settings = dc_replace(settings_any, evaluation=sub_eval)
+                else:
+                    sub_settings = sub_eval
 
                 evaluator = EvaluatorFactory.create(sub_settings, **kwargs)
                 evaluators.append(evaluator)

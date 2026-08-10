@@ -73,12 +73,17 @@ rerank:
 # Evaluation Configuration
 # =============================================================================
 evaluation:
-  enabled: false
+  enabled: true
   provider: "custom"      # custom | ragas | composite
+  # Phase 3: 源级为主（source_hit_rate / source_mrr），chunk 级为辅（hit_rate / mrr）。
+  # 默认不用 ragas 指标（faithfulness 等），避免 custom 后端误配；ragas/composite 由 metrics 按需补充。
   metrics:
     - "hit_rate"
     - "mrr"
-    - "faithfulness"
+    - "source_hit_rate"
+    - "source_mrr"
+  # composite 后端专用：组合的子后端列表（如 [custom, ragas]）。provider != composite 时忽略。
+  backends: []
 
 # =============================================================================
 # Observability Configuration

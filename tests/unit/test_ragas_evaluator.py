@@ -27,6 +27,7 @@ class TestRagasEvaluatorInit:
 
         evaluator = RagasEvaluator()
         assert set(evaluator._metric_names) == {
+            "answer_correctness",
             "answer_relevancy",
             "context_precision",
             "faithfulness",
@@ -60,7 +61,7 @@ class TestRagasEvaluatorInit:
         from src.observability.evaluation.ragas_evaluator import RagasEvaluator
 
         evaluator = RagasEvaluator(settings=None, metrics=None)
-        assert len(evaluator._metric_names) == 3
+        assert len(evaluator._metric_names) == 4
 
 
 class TestRagasImportCheck:
@@ -238,3 +239,140 @@ class TestRagasEvaluatorFactory:
         providers = EvaluatorFactory.list_providers()
         assert "custom" in providers
         # ragas may be in _PROVIDERS after first create or in _LAZY_PROVIDERS
+
+
+class TestRagasEvaluatorBuildWrappers:
+    """Phase 3: non-Azure providers use an OpenAI-compatible client."""
+
+    def _qwen_settings(self) -> MagicMock:
+        """Real LLM/Embedding dataclasses under a MagicMock Settings shell.
+
+        MagicMock can't reliably represent ``api_key=None`` (its __getattr__
+        creates child mocks), so the credential fields use real frozen dataclasses.
+        """
+        from src.core.settings import EmbeddingSettings, LLMSettings
+
+        settings = MagicMock()
+        settings.llm = LLMSettings(
+            provider="qwen", model="qwen-turbo", temperature=0.0, max_tokens=4096,
+            api_key="sk-qwen", base_url="http://localhost:11434/v1",
+        )
+        settings.embedding = EmbeddingSettings(
+            provider="qwen", model="text-embedding-v3", dimensions=1024,
+            api_key="sk-qwen", base_url="http://localhost:11434/v1",
+        )
+        return settings
+
+    def test_qwen_uses_openai_compatible_client_with_base_url(self) -> None:
+        from src.observability.evaluation.ragas_evaluator import RagasEvaluator
+
+        evaluator = RagasEvaluator(settings=self._qwen_settings(), metrics=["faithfulness"])
+
+        with patch("openai.AsyncOpenAI") as mock_client, \
+             patch("openai.AsyncAzureOpenAI") as mock_azure, \
+             patch("ragas.llms.llm_factory") as mock_llm_factory, \
+             patch("ragas.embeddings.OpenAIEmbeddings") as mock_emb:
+            llm, embeddings = evaluator._build_wrappers()
+
+        mock_azure.assert_not_called()
+        assert mock_client.call_args.kwargs["base_url"] == "http://localhost:11434/v1"
+        assert mock_client.call_args.kwargs["api_key"] == "sk-qwen"
+        mock_llm_factory.assert_called_once()
+        mock_emb.assert_called_once_with(model="text-embedding-v3", client=mock_client.return_value)
+        assert llm is mock_llm_factory.return_value
+        assert embeddings is mock_emb.return_value
+
+    def test_ollama_without_api_key_still_builds(self) -> None:
+        from src.core.settings import EmbeddingSettings, LLMSettings
+        from src.observability.evaluation.ragas_evaluator import RagasEvaluator
+
+        settings = MagicMock()
+        settings.llm = LLMSettings(
+            provider="ollama", model="qwen-turbo", temperature=0.0, max_tokens=4096,
+            api_key=None, base_url="http://localhost:11434/v1",
+        )
+        settings.embedding = EmbeddingSettings(
+            provider="qwen", model="text-embedding-v3", dimensions=1024,
+            api_key=None, base_url="http://localhost:11434/v1",
+        )
+        evaluator = RagasEvaluator(settings=settings, metrics=["faithfulness"])
+
+        with patch("openai.AsyncOpenAI") as mock_client, \
+             patch("openai.AsyncAzureOpenAI"), \
+             patch("ragas.llms.llm_factory"), \
+             patch("ragas.embeddings.OpenAIEmbeddings"):
+            evaluator._build_wrappers()
+
+        # api_key=None is constructible for a local OpenAI-compatible gateway
+        assert mock_client.call_args.kwargs.get("api_key") is None
+        assert mock_client.call_args.kwargs["base_url"] == "http://localhost:11434/v1"
+
+
+class TestRagasEvaluatorReference:
+    """Phase 3: ground_truth → reference-answer extraction."""
+
+    def _make(self):
+        from src.observability.evaluation.ragas_evaluator import RagasEvaluator
+
+        return RagasEvaluator(metrics=["faithfulness"])
+
+    def test_str_is_itself(self) -> None:
+        assert self._make()._extract_reference("answer text") == "answer text"
+
+    def test_dict_reference_key(self) -> None:
+        assert self._make()._extract_reference({"reference": "ans"}) == "ans"
+
+    def test_dict_reference_answer_key(self) -> None:
+        assert self._make()._extract_reference({"reference_answer": "ans2"}) == "ans2"
+
+    def test_dict_without_reference_returns_none(self) -> None:
+        assert self._make()._extract_reference({"ids": ["c1"]}) is None
+
+    def test_none_returns_none(self) -> None:
+        assert self._make()._extract_reference(None) is None
+
+    def test_single_element_list(self) -> None:
+        assert self._make()._extract_reference(["ans"]) == "ans"
+
+    def test_multi_element_list_returns_none(self) -> None:
+        assert self._make()._extract_reference(["a", "b"]) is None
+
+
+class TestRagasEvaluatorAnswerCorrectness:
+    """Phase 3: answer_correctness uses reference; skips gracefully without it."""
+
+    def _evaluator(self):
+        from src.observability.evaluation.ragas_evaluator import RagasEvaluator
+
+        evaluator = RagasEvaluator(metrics=["answer_correctness"])
+        evaluator._build_wrappers = MagicMock(return_value=(MagicMock(), MagicMock()))
+        return evaluator
+
+    def test_scores_with_reference(self, monkeypatch) -> None:
+        captured: dict[str, Any] = {}
+
+        class FakeAnswerCorrectness:
+            def __init__(self, llm: Any, embeddings: Any) -> None:
+                captured["llm"] = llm
+                captured["embeddings"] = embeddings
+
+            def score(self, user_input: str, response: str, reference: str) -> MagicMock:
+                captured["call"] = (user_input, response, reference)
+                return MagicMock(value=0.85)
+
+        monkeypatch.setattr(
+            "ragas.metrics.collections.AnswerCorrectness", FakeAnswerCorrectness
+        )
+
+        result = self._evaluator()._run_ragas("q", ["ctx1"], "answer", reference="ref ans")
+
+        assert result["answer_correctness"] == pytest.approx(0.85)
+        assert captured["call"] == ("q", "answer", "ref ans")
+
+    def test_skipped_when_no_reference(self, monkeypatch) -> None:
+        evaluator = self._evaluator()
+        with patch("ragas.metrics.collections.AnswerCorrectness") as mock_ac:
+            result = evaluator._run_ragas("q", ["ctx1"], "answer", reference=None)
+
+        assert result == {}
+        mock_ac.assert_not_called()

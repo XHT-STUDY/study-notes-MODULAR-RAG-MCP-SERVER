@@ -32,6 +32,87 @@
 
 ---
 
+## Phase 3 — 评测闭环（2026-08-10）
+
+### 1. 本次开发了哪些内容
+
+按 `gaizao_plan.md` §6 交付「评测闭环」，把原来**指标恒为 0、ragas 完全不可用**的评测链路修成可端到端出数。用户拍板三个决策：**源级匹配为主**（新增 `source_hit_rate`/`source_mrr`，chunk 级为辅并存计算）、**修复 ragas 依赖 + 加 qwen/custom 支持**、**报告扩展**（run_id/config 快照 + JSON/HTML + `--ablate`）。
+
+- **依赖修复**：`pyproject.toml` 加 `"langchain-community>=0.3.0,<0.4.2"`（镜像 `mcp<2.0.0` 模式，注释说明 ragas#2745），`uv lock` + `VIRTUAL_ENV=.venv-3.12 uv sync --locked` → `import ragas` 不再崩。
+- **`RagasEvaluator` 泛化**：`_build_wrappers()` 由"非 azure 就 raise"改为"非 azure 一律走 OpenAI 兼容 client"（`AsyncOpenAI(api_key, base_url)`），qwen/deepseek/ollama 均可用；ollama 允许 `api_key=None` 走本地 base_url。新增 `answer_correctness` 指标（`score(user_input, response, reference)`）+ `_extract_reference(ground_truth)`（dict 取 `reference`/`reference_answer`，str 自身，单元素 list，无 reference 优雅跳过不崩）。
+- **Golden 集补齐**（`tests/fixtures/golden_test_set.json` v1.1）：5 条查询 `expected_sources` 确定性填 `["complex_technical_doc.pdf"]`（只用 basename，跨机可移植）；`expected_chunk_ids` 提交留 `[]` + 顶层 `_notes` 键说明"源级为主、chunk 级为辅、chunk_id 本机生成不可移植"；新增 `scripts/verify_golden_set.py`（逐查询打印实际命中 source + `--refresh-ids` 生成 gitignore 的 `golden_test_set.local.json`）。
+- **`CustomEvaluator` 改造**：`SUPPORTED_METRICS` 加 `source_hit_rate`/`source_mrr`；**显式 raise / settings 过滤分离**（`metrics=` 显式传入仍抛 ValueError，settings 派生则过滤到支持集、空则回落默认）；修复 `.chunk_id` 提取（非 dict 分支 `hasattr(item, "id")` → `or hasattr(item, "chunk_id")`，真实 `RetrievalResult` 不再抛错）；`_extract_ground_truth_ids` 无 `ids` 键返回 `[]`；新增 `_extract_sources`/`_compute_source_hit_rate`/`_compute_source_mrr`（统一 `Path(p).name` basename）。
+- **`EvalRunner` 富化**：`EvalReport` 加 `run_id`/`timestamp`/`collection`/`variant`/`config_snapshot`（全部带默认值向后兼容，`to_dict()` 空值省略）；`_evaluate_single` 的 ground_truth 由"无 ids 则 None"改为**总是完整 dict** `{"ids":..., "sources":..., "reference":...}`，reference_answer 首次进入评估链路；新增 `_build_config_snapshot`。
+- **报告输出**：新增 `src/observability/evaluation/report_html.py`（纯函数手写内联 HTML，`html.escape` 防注入）；`scripts/evaluate.py` 加 `--report-dir`（默认 `reports/`，已 gitignore）+ `--ablate`，写 `reports/eval_<run_id>.json` + `.html`，`--json` stdout 行为不变。
+- **Ablation**：新增 `src/observability/evaluation/ablation_runner.py`，4 变体 `dense`/`sparse`/`hybrid`/`hybrid_rerank`，retriever/query_processor/fusion 装配一次、每变体新建 `HybridSearch(config=HybridSearchConfig(...))`（工厂不接受 config 且 `_extract_config` 硬编码 enable 双开，必须直接构造），`ablation_to_dict` 产出对比矩阵。
+- **Settings + Composite**：`EvaluationSettings` 加 `backends: list[str]` 字段（frozen 带默认值）；`CompositeEvaluator._build_from_settings` 弃 MagicMock 改 `dataclasses.replace`（配 `is_dataclass` 守卫 + 非 dataclass 强制转真实 `EvaluationSettings`），`provider=composite` 不再 ValueError。
+- **两份 YAML**：`evaluation.enabled: true`（Phase 3 默认启用，custom 规则指标无 LLM 成本）、`metrics` 改为 4 个源级+chunk 级指标、`backends: []`。
+- **Dashboard 文案**：`evaluation_panel.py` custom 后端警告改为"源级为主：填 `expected_sources` 即可算 `source_hit_rate`/`source_mrr`"。
+
+### 2. 测试方法与预期效果
+
+```powershell
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_ragas_evaluator.py -q                       # 18 → 30 passed
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_custom_evaluator.py tests/unit/test_eval_runner.py tests/unit/test_composite_evaluator.py tests/unit/test_report_html.py tests/unit/test_ablation_runner.py tests/unit/test_config_loading.py -q
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit -m "not llm" -q -p no:cacheprovider               # 全量回归
+.\.venv-3.12\Scripts\python.exe -m ruff check src/libs/evaluator src/observability/evaluation scripts/evaluate.py
+.\.venv-3.12\Scripts\python.exe -m mypy --python-version 3.12 src/libs/evaluator src/observability/evaluation src/core/settings.py
+.\.venv-3.12\Scripts\python.exe scripts/seed_docs.py --collection eval_default --clean
+.\.venv-3.12\Scripts\python.exe scripts/evaluate.py --test-set tests/fixtures/golden_test_set.json --collection eval_default --json
+.\.venv-3.12\Scripts\python.exe scripts/evaluate.py --test-set tests/fixtures/golden_test_set.json --collection eval_default --ablate --json
+.\.venv-3.12\Scripts\python.exe scripts/verify_golden_set.py --collection eval_default
+```
+
+**预期效果**：`source_hit_rate`/`source_mrr` 非全 0（源级指标证明链路端到端可用）；`reports/` 生成 `eval_*.json` + `*.html`；ablation 4 变体对比；`verify_golden_set.py` 逐查询命中 expected source。
+
+### 3. 本次改动的原因
+
+| 问题 | 后果 | 解决 |
+|---|---|---|
+| golden 集 `expected_chunk_ids`/`expected_sources` 全空 | `EvalRunner` 把 ground_truth 设为 None → `hit_rate`/`mrr` 恒 0 | 补 `expected_sources`（basename，跨机可移植）+ `_notes` 说明 |
+| `_extract_ids` 只认 `.id` 不认 `.chunk_id`（[custom_evaluator.py:131](src/libs/evaluator/custom_evaluator.py#L131)） | 真实检索返回 `RetrievalResult` 抛 ValueError 被 EvalRunner 吞掉 | `hasattr(item, "id") or hasattr(item, "chunk_id")` |
+| chunk-id 含绝对路径 hash + LLM 精炼文本 hash | 跨机必变（实测 20f8e11b vs cc6536dd），chunk 级无法作为主基准 | 源级匹配为主，chunk 级为辅并存计算 |
+| ragas 0.4.3 在 `ragas/llms/base.py` 导入 `langchain_community.chat_models.vertexai`，而 langchain-community≥0.4.2 已删除 | `import ragas` 崩溃 → 18 个 unit 测试挂 | pin `langchain-community<0.4.2` |
+| `reference_answer` 从未透传、RagasEvaluator 忽略 ground_truth | 无法算 `answer_correctness` | `_evaluate_single` 总是传完整 dict + `_extract_reference` + 新指标 |
+| `EvaluationSettings` 无 `backends` 字段 | `provider=composite` 恒 ValueError | 加字段 + `dataclasses.replace` 装配 |
+
+### 4. 重点难点
+
+- **源级 vs chunk 级取舍**：`expected_sources` 用 basename 可移植、单源 golden 下会饱和 1.0——这是预期且可接受（区分信号来自 ablation 的 `source_mrr` + ragas 生成类指标）；chunk-id 因跨机不可移植提交留空。
+- **显式 raise vs settings 过滤**：`metrics=` 显式传入保持抛 ValueError（既有测试 `test_unsupported_metric_raises` 依赖）；settings 派生则过滤到 SUPPORTED_METRICS，composite（metrics 混有 ragas 指标）不炸。两种语义必须并存，不能一刀切。
+- **ablation 复用装配**：`HybridSearchConfig._extract_config` 硬编码 `enable_dense/enable_sparse=True`，且 `create_hybrid_search()` 不接受 config → 只能直接构造 `HybridSearch` 传 `config=`，不能走工厂。
+- **`dataclasses.replace` 在 MagicMock 上崩**：既有测试用 MagicMock settings，`replace()` 要求 dataclass 实例 → `_build_from_settings` 用 `is_dataclass` 守卫 + 非 dataclass 强制转真实 `EvaluationSettings`。
+- **Windows 15.6ms `time.monotonic()` 分辨率**：实测 `time.sleep(0.02)` delta 约 16ms、`sleep(0.001)` 为 0.0 → 时序断言从 `> 0` 放宽为 `isinstance(float) and >= 0`，这是既有脆弱性不是 Phase 3 回归。
+- **GBK 控制台**：emoji 日志在 Windows 默认 GBK 下 UnicodeEncodeError → 脚本统一加 UTF-8 stdout wrapper。
+- **ruff/mypy 债务隔离**：基线仓库在 ruff 0.16.1 下本身 dirty（UP006/UP045/UP035），用「git diff 新增行 ∩ ruff JSON 违规行」脚本锁定"零新增违规"；mypy 同理比对 stash 基线确认零新增错误。
+
+### 5. 你应该学到什么
+
+- **指标可移植性设计**：basename vs 绝对路径、内容 hash vs 位置——评测基准必须脱离机器环境。
+- **NoneEvaluator 与 enabled gating**：`evaluation.enabled=false` 时 EvaluatorFactory 返回 NoneEvaluator 静默 `{}`，评测"关闭但不报错"的降级模式。
+- **工厂 + lazy provider**：`EvaluatorFactory` 的 `_PROVIDERS`/`_LAZY_PROVIDERS` 注册模式；composite 通过 `dataclasses.replace` 派生子配置再递归走工厂。
+- **现代 typing 与债务隔离方法**：`dict`/`list`/`X | None`（UP006/UP045），用 diff∩lint 脚本精确区分"新增 vs 既有"违规。
+- **mypy 共享变量推导**：`_run_ragas` 的 `m` 变量被多类型指标复用 → `Any` 注解；`dataclasses.replace` 类型变量绑定约束。
+
+### 6. 验证结果与遗留事项
+
+**实际跑出的数字**（`.venv-3.12/Scripts/python.exe`）：
+
+- 7 个评测相关测试文件 **114 个用例全部通过**（`test_ragas_evaluator.py` 由 18 → **30 passed**）。
+- 全量单测 `-m "not llm"`：**1290 passed, 1 skipped, 14 failed**——14 个失败全部为既有（embedding_providers_smoke×6 / list_collections×1 / loader_pdf_contract×1 / batch_processor×2 / sparse_encoder×2 / trace×2），**git stash 基线同 14 个失败确认与 Phase 3 无关**。
+- ruff：Phase 3 新增行 **0 违规**（`custom_evaluator.py` 全文件 clean；其余仅剩基线债务）。
+- mypy：新增 **0 错误**（剩 4 个既有：eval_runner×2 既有 helper + evaluator_factory×2）。
+- 端到端：`seed_docs.py --collection eval_default --clean` → **Ingested 7 / Failed 0**；`evaluate.py` → 聚合 **source_hit_rate=1.0, source_mrr=0.7667**（chunk 级 hit_rate/mrr=0.0 属预期：expected_chunk_ids 留空）；ablation → **source_mrr：sparse=0.8667 > hybrid=0.7667 = hybrid_rerank=0.7667 > dense=0.7333**，4 变体齐全，`reports/eval_*.json` + `.html` 生成；`verify_golden_set.py` → 5/5 查询命中 `complex_technical_doc.pdf`，**ALL_GOOD**。
+
+**遗留事项**：
+
+- `hit_rate`/`mrr` 恒 0 是**设计选择**（提交的 golden 集 chunk-id 留空）；本机做 chunk 级验证用 `scripts/verify_golden_set.py --refresh-ids <collection>` 生成 local 集再 `--test-set` 指向它。
+- ragas 后端需真实 LLM key，本次 e2e 未跑（provider=custom）；qwen/custom 支持已由单测覆盖（patch AsyncOpenAI 断言 base_url/api_key）。
+- 14 个既有失败与 Phase 3 无关，按范围限定不修。
+- `config/settings.yaml` 的 `evaluation.enabled` 已翻为 `true`，MCP 服务器若构造 EvaluatorFactory 会实例化 CustomEvaluator（当前无入口调用评测，无影响）。
+
+---
+
 ## Phase 2 — 生成式问答链路（2026-08-10）
 
 ### 1. 本次开发了哪些内容

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Union
 
@@ -161,6 +161,9 @@ class EvaluationSettings:
     enabled: bool
     provider: str
     metrics: List[str]
+    # Composite backend: list of provider names (e.g. [custom, ragas]) that the
+    # CompositeEvaluator composes.  Only used when provider == "composite".
+    backends: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -338,6 +341,11 @@ class Settings:
                 enabled=_require_bool(evaluation, "enabled", "evaluation"),
                 provider=_require_str(evaluation, "provider", "evaluation"),
                 metrics=[str(item) for item in _require_list(evaluation, "metrics", "evaluation")],
+                backends=(
+                    [str(item) for item in _require_list(evaluation, "backends", "evaluation")]
+                    if "backends" in evaluation
+                    else []
+                ),
             ),
             observability=ObservabilitySettings(
                 log_level=_require_str(observability, "log_level", "observability"),

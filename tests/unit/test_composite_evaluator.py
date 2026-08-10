@@ -171,3 +171,56 @@ class TestCompositeEvaluatorFactory:
             ground_truth=["c1"],
         )
         assert "hit_rate" in metrics
+
+
+class TestCompositeEvaluatorRealSettings:
+    """Config-driven composition against real Settings objects (Phase 3)."""
+
+    def test_config_driven_with_real_full_settings(self) -> None:
+        """dataclasses.replace on real frozen Settings builds a working custom backend."""
+        from dataclasses import replace as dc_replace
+
+        from src.core.settings import REPO_ROOT, load_settings
+
+        settings = load_settings(REPO_ROOT / "config" / "settings.yaml.example")
+        eval_cfg = dc_replace(
+            settings.evaluation,
+            enabled=True,  # force enabled so the composite backend is exercised
+            provider="composite",
+            metrics=["hit_rate", "mrr", "faithfulness"],
+            backends=["custom"],
+        )
+        full = dc_replace(settings, evaluation=eval_cfg)
+
+        composite = CompositeEvaluator(settings=full)
+        assert len(composite.evaluators) == 1
+
+        metrics = composite.evaluate(
+            query="test",
+            retrieved_chunks=[{"id": "c1"}],
+            ground_truth=["c1"],
+        )
+        assert "hit_rate" in metrics
+        # faithfulness (ragas-owned) is filtered out by CustomEvaluator settings path
+        assert "faithfulness" not in metrics
+
+    def test_config_driven_with_bare_evaluation_settings(self) -> None:
+        """A bare EvaluationSettings (no full Settings wrapper) also composes."""
+        from src.core.settings import EvaluationSettings
+
+        eval_cfg = EvaluationSettings(
+            enabled=True,
+            provider="composite",
+            metrics=["hit_rate", "mrr"],
+            backends=["custom"],
+        )
+
+        composite = CompositeEvaluator(settings=eval_cfg)
+        assert len(composite.evaluators) == 1
+
+        metrics = composite.evaluate(
+            query="test",
+            retrieved_chunks=[{"id": "c1"}],
+            ground_truth=["c1"],
+        )
+        assert "hit_rate" in metrics

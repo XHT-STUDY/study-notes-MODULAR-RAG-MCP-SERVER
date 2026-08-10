@@ -78,6 +78,7 @@ def test_load_settings_success(tmp_path: Path) -> None:
     assert settings.retrieval.rrf_k == 60
     assert settings.rerank.provider == "none"
     assert settings.evaluation.metrics == ["hit_rate", "mrr"]
+    assert settings.evaluation.backends == []  # optional field, absent → default empty
     assert settings.observability.log_level == "INFO"
     assert settings.ingestion is not None
     assert settings.answer_generator is None
@@ -123,6 +124,55 @@ def test_missing_required_field_raises_error(tmp_path: Path) -> None:
 
     with pytest.raises(SettingsError, match="embedding.provider"):
         load_settings(settings_path)
+
+
+def test_evaluation_backends_optional_field(tmp_path: Path) -> None:
+    """Phase 3: composite 'backends' list parses when present."""
+    config = """
+    llm:
+      provider: openai
+      model: gpt-4o-mini
+      temperature: 0.0
+      max_tokens: 1024
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+      dimensions: 1536
+    vector_store:
+      provider: chroma
+      persist_directory: ./data/db/chroma
+      collection_name: knowledge_hub
+    retrieval:
+      dense_top_k: 20
+      sparse_top_k: 20
+      fusion_top_k: 10
+      rrf_k: 60
+    rerank:
+      enabled: false
+      provider: none
+      model: cross-encoder/ms-marco-MiniLM-L-6-v2
+      top_k: 5
+    evaluation:
+      enabled: true
+      provider: composite
+      metrics:
+        - hit_rate
+        - mrr
+      backends:
+        - custom
+        - ragas
+    observability:
+      log_level: INFO
+      trace_enabled: true
+      trace_file: ./logs/traces.jsonl
+      structured_logging: true
+    """
+    settings_path = tmp_path / "settings.yaml"
+    _write_yaml(settings_path, config)
+
+    settings = load_settings(settings_path)
+
+    assert settings.evaluation.backends == ["custom", "ragas"]
 
 
 # ---------------------------------------------------------------------------

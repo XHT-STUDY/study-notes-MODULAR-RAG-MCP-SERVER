@@ -24,8 +24,14 @@ logger = logging.getLogger(__name__)
 FAITHFULNESS = "faithfulness"
 ANSWER_RELEVANCY = "answer_relevancy"
 CONTEXT_PRECISION = "context_precision"
+ANSWER_CORRECTNESS = "answer_correctness"
 
-SUPPORTED_METRICS = {FAITHFULNESS, ANSWER_RELEVANCY, CONTEXT_PRECISION}
+SUPPORTED_METRICS = {
+    FAITHFULNESS,
+    ANSWER_RELEVANCY,
+    CONTEXT_PRECISION,
+    ANSWER_CORRECTNESS,
+}
 
 
 def _import_ragas() -> None:
@@ -136,9 +142,10 @@ class RagasEvaluator(BaseEvaluator):
             )
 
         contexts = self._extract_texts(retrieved_chunks)
+        reference = self._extract_reference(ground_truth)
 
         try:
-            result = self._run_ragas(query, contexts, generated_answer)
+            result = self._run_ragas(query, contexts, generated_answer, reference)
         except Exception as exc:
             logger.error("Ragas evaluation failed: %s", exc, exc_info=True)
             raise RuntimeError(f"Ragas evaluation failed: {exc}") from exc
@@ -152,6 +159,7 @@ class RagasEvaluator(BaseEvaluator):
         query: str,
         contexts: List[str],
         answer: str,
+        reference: str | None = None,
     ) -> Dict[str, float]:
         """Execute Ragas collections metrics and return normalised scores.
 
@@ -159,10 +167,12 @@ class RagasEvaluator(BaseEvaluator):
         the legacy ``evaluate()`` pipeline.  Each metric has its own signature:
         - Faithfulness / ContextPrecision: (user_input, response, retrieved_contexts)
         - AnswerRelevancy: (user_input, response)
+        - AnswerCorrectness: (user_input, response, reference)
         """
         from ragas.metrics.collections import (
             Faithfulness,
             AnswerRelevancy,
+            AnswerCorrectness,
             ContextPrecisionWithoutReference,
         )
 
@@ -173,7 +183,9 @@ class RagasEvaluator(BaseEvaluator):
 
         for metric_name in self._metric_names:
             if metric_name == FAITHFULNESS:
-                m = Faithfulness(llm=llm)
+                # Ragas collection metrics share no common ABC; type the var Any
+                # so the per-branch reassignments below stay mypy-clean.
+                m: Any = Faithfulness(llm=llm)
                 result = m.score(
                     user_input=query, response=answer, retrieved_contexts=contexts,
                 )
@@ -185,6 +197,17 @@ class RagasEvaluator(BaseEvaluator):
                 result = m.score(
                     user_input=query, response=answer, retrieved_contexts=contexts,
                 )
+            elif metric_name == ANSWER_CORRECTNESS:
+                if not reference:
+                    # answer_correctness needs a reference answer; skip gracefully.
+                    logger.warning(
+                        "Skipping '%s': no reference answer in ground_truth", ANSWER_CORRECTNESS
+                    )
+                    continue
+                m = AnswerCorrectness(llm=llm, embeddings=embeddings)
+                result = m.score(
+                    user_input=query, response=answer, reference=reference,
+                )
             else:
                 continue
 
@@ -192,11 +215,35 @@ class RagasEvaluator(BaseEvaluator):
 
         return scores
 
+    def _extract_reference(self, ground_truth: Any | None) -> str | None:
+        """Extract a reference answer from the ground-truth structure.
+
+        Accepts a string itself, a dict with ``reference``/``reference_answer``
+        key, or a single-element list.  Returns ``None`` when no reference is
+        available so answer_correctness is skipped gracefully.
+        """
+        if ground_truth is None:
+            return None
+        if isinstance(ground_truth, str):
+            return ground_truth
+        if isinstance(ground_truth, dict):
+            ref = ground_truth.get("reference") or ground_truth.get("reference_answer")
+            return str(ref) if ref else None
+        if isinstance(ground_truth, list) and len(ground_truth) == 1:
+            return str(ground_truth[0])
+        return None
+
     def _build_wrappers(self) -> tuple:
         """Build Ragas LLM and Embedding wrappers from project settings.
 
         Uses Ragas 0.4+ native API (InstructorLLM + OpenAIEmbeddings)
         instead of deprecated LangchainLLMWrapper.
+
+        Provider mapping (Phase 3): every non-Azure provider — openai, qwen,
+        deepseek, ollama, or a private OpenAI-compatible gateway — is built as
+        an ``AsyncOpenAI`` client.  qwen/custom gateways are reached through
+        ``base_url`` (e.g. ``LLM_BASE_URL`` env override); ollama may pass
+        ``api_key=None`` and rely on a local ``base_url``.
 
         Returns:
             Tuple of (llm_wrapper, embeddings_wrapper).
@@ -221,17 +268,15 @@ class RagasEvaluator(BaseEvaluator):
         )
 
         if use_azure_llm:
-            llm_client = AsyncAzureOpenAI(
+            llm_client: AsyncOpenAI = AsyncAzureOpenAI(
                 api_key=llm_cfg.api_key,
                 azure_endpoint=llm_azure_endpoint or llm_cfg.azure_endpoint,
                 api_version=getattr(llm_cfg, "api_version", None) or "2024-02-15-preview",
             )
-        elif provider == "openai":
-            llm_client = AsyncOpenAI(api_key=llm_cfg.api_key)
         else:
-            raise ValueError(
-                f"Unsupported LLM provider for Ragas: '{provider}'. "
-                "Supported: azure, openai"
+            llm_client = AsyncOpenAI(
+                api_key=llm_cfg.api_key,
+                base_url=getattr(llm_cfg, "base_url", None) or None,
             )
 
         llm = llm_factory(llm_cfg.model, client=llm_client, max_tokens=8192)
@@ -248,17 +293,15 @@ class RagasEvaluator(BaseEvaluator):
         )
 
         if use_azure_emb:
-            emb_client = AsyncAzureOpenAI(
+            emb_client: AsyncOpenAI = AsyncAzureOpenAI(
                 api_key=emb_cfg.api_key,
                 azure_endpoint=emb_azure_endpoint or emb_cfg.azure_endpoint,
                 api_version=getattr(emb_cfg, "api_version", None) or "2024-02-15-preview",
             )
-        elif emb_provider == "openai":
-            emb_client = AsyncOpenAI(api_key=emb_cfg.api_key)
         else:
-            raise ValueError(
-                f"Unsupported embedding provider for Ragas: '{emb_provider}'. "
-                "Supported: azure, openai"
+            emb_client = AsyncOpenAI(
+                api_key=emb_cfg.api_key,
+                base_url=getattr(emb_cfg, "base_url", None) or None,
             )
 
         embeddings = OpenAIEmbeddings(model=emb_cfg.model, client=emb_client)

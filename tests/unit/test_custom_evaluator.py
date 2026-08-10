@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.core.types import RetrievalResult
 from src.libs.evaluator.base_evaluator import NoneEvaluator
 from src.libs.evaluator.custom_evaluator import CustomEvaluator
 from src.libs.evaluator.evaluator_factory import EvaluatorFactory
@@ -161,3 +162,111 @@ class TestCustomEvaluatorBoundary:
             evaluator.evaluate("", [{"id": "x"}])
         with pytest.raises(ValueError):
             evaluator.evaluate("q", [])
+
+
+# ── Phase 3: source-level metrics + chunk_id extraction ────────────────────
+
+
+class TestCustomEvaluatorPhase3:
+    """Source-level metrics, .chunk_id extraction and settings-derived filtering."""
+
+    def test_source_hit_rate_and_source_mrr(self) -> None:
+        """Basename matching against expected_sources (primary Phase 3 signal)."""
+        evaluator = CustomEvaluator(metrics=["source_hit_rate", "source_mrr"])
+        retrieved = [
+            {"id": "c1", "metadata": {"source_path": "C:/data/other.pdf"}},
+            {"id": "c2", "metadata": {"source_path": "C:/data/complex_technical_doc.pdf"}},
+        ]
+        ground_truth = {"sources": ["complex_technical_doc.pdf"], "ids": ["c1"]}
+
+        metrics = evaluator.evaluate("q", retrieved, ground_truth=ground_truth)
+
+        assert metrics["source_hit_rate"] == 1.0
+        assert metrics["source_mrr"] == pytest.approx(0.5)  # hit at rank 2
+
+    def test_source_matching_normalizes_basenames(self) -> None:
+        """Full source_path on chunks vs basename on ground truth still match."""
+        evaluator = CustomEvaluator(metrics=["source_hit_rate", "source_mrr"])
+        retrieved = [
+            {"id": "c1", "source_path": "/abs/path/to/complex_technical_doc.pdf"},
+        ]
+        ground_truth = {"sources": ["complex_technical_doc.pdf"]}
+
+        metrics = evaluator.evaluate("q", retrieved, ground_truth=ground_truth)
+
+        assert metrics["source_hit_rate"] == 1.0
+        assert metrics["source_mrr"] == 1.0
+
+    def test_source_metrics_no_ground_truth_sources_zero(self) -> None:
+        evaluator = CustomEvaluator(metrics=["source_hit_rate", "source_mrr"])
+        retrieved = [{"id": "c1", "metadata": {"source_path": "a.pdf"}}]
+
+        metrics = evaluator.evaluate("q", retrieved, ground_truth={"ids": ["c1"]})
+
+        assert metrics["source_hit_rate"] == 0.0
+        assert metrics["source_mrr"] == 0.0
+
+    def test_extract_ids_from_retrieval_result_chunk_id(self) -> None:
+        """Real RetrievalResult exposes .chunk_id (not .id) — must be extracted."""
+        evaluator = CustomEvaluator(metrics=["hit_rate", "mrr"])
+        retrieved = [
+            RetrievalResult(chunk_id="c1", score=0.9, text="t1"),
+            RetrievalResult(chunk_id="c2", score=0.8, text="t2"),
+        ]
+
+        metrics = evaluator.evaluate("q", retrieved, ground_truth=["c2"])
+
+        assert metrics["hit_rate"] == 1.0
+        assert metrics["mrr"] == pytest.approx(0.5)
+
+    def test_extract_sources_from_retrieval_result_metadata(self) -> None:
+        evaluator = CustomEvaluator(metrics=["source_hit_rate"])
+        retrieved = [
+            RetrievalResult(
+                chunk_id="c1", score=0.9, text="t1",
+                metadata={"source_path": "/data/complex_technical_doc.pdf"},
+            ),
+        ]
+
+        metrics = evaluator.evaluate(
+            "q", retrieved, ground_truth={"sources": ["complex_technical_doc.pdf"]}
+        )
+
+        assert metrics["source_hit_rate"] == 1.0
+
+    def test_settings_derived_metrics_filters_unsupported(self) -> None:
+        """faithfulness (ragas-owned) is filtered, not raised, when settings-derived."""
+        settings = MagicMock()
+        settings.evaluation.metrics = ["faithfulness", "hit_rate", "source_hit_rate"]
+
+        evaluator = CustomEvaluator(settings=settings)
+
+        assert evaluator.metrics == ["hit_rate", "source_hit_rate"]
+
+    def test_settings_derived_all_unsupported_falls_back_to_default(self) -> None:
+        settings = MagicMock()
+        settings.evaluation.metrics = ["faithfulness", "answer_relevancy"]
+
+        evaluator = CustomEvaluator(settings=settings)
+
+        assert evaluator.metrics == ["hit_rate", "mrr"]
+
+    def test_settings_derived_empty_metrics_falls_back_to_default(self) -> None:
+        settings = MagicMock()
+        settings.evaluation.metrics = []
+
+        evaluator = CustomEvaluator(settings=settings)
+
+        assert evaluator.metrics == ["hit_rate", "mrr"]
+
+    def test_explicit_unsupported_metric_still_raises(self) -> None:
+        """Explicit metrics= must keep raising (misconfiguration surfaces loudly)."""
+        with pytest.raises(ValueError, match="Unsupported custom metrics"):
+            CustomEvaluator(metrics=["faithfulness"])
+
+    def test_ground_truth_dict_without_ids_returns_empty(self) -> None:
+        """A full ground-truth dict carrying only sources must not raise."""
+        evaluator = CustomEvaluator(metrics=["hit_rate", "source_hit_rate"])
+
+        assert evaluator._extract_ground_truth_ids({"sources": ["a.pdf"]}) == []
+        assert evaluator._extract_ground_truth_sources({"sources": ["a.pdf"]}) == ["a.pdf"]

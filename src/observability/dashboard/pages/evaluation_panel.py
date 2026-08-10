@@ -51,11 +51,12 @@ def render() -> None:
     # Show info/warning based on selected backend
     if backend in ("custom", "composite"):
         st.info(
-            "ℹ️ **Custom Evaluator** 尚未完成数据集准备，当前仅为预留接口。"
-            "Custom Evaluator 需要在 Golden Test Set 中填写 `expected_chunk_ids` "
-            "作为 ground truth 才能计算 hit_rate / MRR 指标。"
-            "目前建议使用 **ragas** 后端进行评估。",
-            icon="🚧",
+            "ℹ️ **源级匹配为主（Phase 3）**：在 Golden Test Set 中填写 "
+            "`expected_sources`（文档文件名）即可计算 `source_hit_rate` / "
+            "`source_mrr`；`expected_chunk_ids`（chunk 级精确匹配）为辅，"
+            "因 chunk id 依赖绝对路径 hash + LLM 精炼文本 hash，跨机不可移植，"
+            "可用 `scripts/verify_golden_set.py --refresh-ids` 生成本机版本。",
+            icon="ℹ️",
         )
 
     with col2:

@@ -38,6 +38,29 @@ class StubEvaluator(BaseEvaluator):
         return {"hit_rate": 1.0, "mrr": 0.5}
 
 
+class CapturingEvaluator(BaseEvaluator):
+    """Evaluator that records what it receives for later assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def evaluate(
+        self,
+        query: str,
+        retrieved_chunks: list[Any],
+        generated_answer: str | None = None,
+        ground_truth: Any | None = None,
+        trace: Any | None = None,
+        **kwargs: Any,
+    ) -> dict[str, float]:
+        self.calls.append({
+            "query": query,
+            "generated_answer": generated_answer,
+            "ground_truth": ground_truth,
+        })
+        return {"hit_rate": 1.0}
+
+
 def _write_golden_json(path: Path, test_cases: List[Dict]) -> None:
     data = {"test_cases": test_cases}
     path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -129,7 +152,10 @@ class TestEvalRunner:
         assert len(report.query_results) == 2
         assert report.aggregate_metrics["hit_rate"] == 1.0
         assert report.aggregate_metrics["mrr"] == 0.5
-        assert report.total_elapsed_ms > 0
+        # time.monotonic() on Windows has ~15.6 ms resolution, so a fast in-memory
+        # run can legitimately measure 0.0 ms — only assert it is a non-negative float.
+        assert isinstance(report.total_elapsed_ms, float)
+        assert report.total_elapsed_ms >= 0
 
     def test_run_with_hybrid_search(self, tmp_path: Path) -> None:
         f = tmp_path / "g.json"
@@ -179,6 +205,57 @@ class TestEvalRunner:
         assert d["query_count"] == 1
         assert d["evaluator_name"] == "StubEvaluator"
 
+    def test_report_to_dict_metadata_fields(self, tmp_path: Path) -> None:
+        """Phase 3: to_dict carries run_id/timestamp/collection/config_snapshot."""
+        f = tmp_path / "g.json"
+        _write_golden_json(f, [{"query": "Q"}])
+
+        runner = EvalRunner(evaluator=StubEvaluator())
+        report = runner.run(f, top_k=7)
+
+        d = report.to_dict()
+        assert d["run_id"]
+        assert d["timestamp"]
+        assert d["collection"] == "default"
+        assert d["config_snapshot"]["top_k"] == 7
+
+    def test_ground_truth_passes_sources_and_reference(self, tmp_path: Path) -> None:
+        """Phase 3: full ground-truth dict (ids/sources/reference) reaches evaluator."""
+        f = tmp_path / "g.json"
+        _write_golden_json(f, [
+            {
+                "query": "Q",
+                "expected_chunk_ids": ["c1"],
+                "expected_sources": ["complex_technical_doc.pdf"],
+                "reference_answer": "The answer is X",
+            },
+        ])
+
+        eval_ = CapturingEvaluator()
+        runner = EvalRunner(evaluator=eval_)
+        runner.run(f)
+
+        assert eval_.calls[0]["ground_truth"] == {
+            "ids": ["c1"],
+            "sources": ["complex_technical_doc.pdf"],
+            "reference": "The answer is X",
+        }
+
+    def test_ground_truth_empty_expected_ids_still_dict(self, tmp_path: Path) -> None:
+        """An empty expected_chunk_ids must NOT collapse ground_truth to None."""
+        f = tmp_path / "g.json"
+        _write_golden_json(f, [{"query": "Q"}])
+
+        eval_ = CapturingEvaluator()
+        runner = EvalRunner(evaluator=eval_)
+        runner.run(f)
+
+        assert eval_.calls[0]["ground_truth"] == {
+            "ids": [],
+            "sources": [],
+            "reference": None,
+        }
+
 
 class TestEvalRunnerAggregation:
     """Test metric aggregation logic."""
@@ -209,6 +286,18 @@ class TestEvalRunnerAggregation:
         # Each metric averaged over only the queries that produced it
         assert avg["hit_rate"] == 1.0
         assert avg["faithfulness"] == 0.9
+
+    def test_aggregate_source_metrics(self) -> None:
+        """Phase 3: source-level metrics aggregate like chunk-level ones."""
+        results = [
+            QueryResult(query="q1", metrics={"source_hit_rate": 1.0, "source_mrr": 0.5}),
+            QueryResult(query="q2", metrics={"source_hit_rate": 0.0, "source_mrr": 1.0}),
+        ]
+
+        avg = EvalRunner._aggregate_metrics(results)
+
+        assert avg["source_hit_rate"] == pytest.approx(0.5)
+        assert avg["source_mrr"] == pytest.approx(0.75)
 
 
 # ── Tests: Golden test set fixture ────────────────────────────────
