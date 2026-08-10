@@ -468,10 +468,13 @@ class TestMCPToolResponseDataclass:
     def test_response_default_values(self) -> None:
         """Test MCPToolResponse default values."""
         response = MCPToolResponse(content="Test")
-        
+
         assert response.citations == []
         assert response.metadata == {}
         assert response.is_empty is False
+        assert response.answer is None
+        assert response.confidence is None
+        assert response.refusal_reason is None
 
 
 # =============================================================================

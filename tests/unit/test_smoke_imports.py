@@ -81,6 +81,12 @@ class TestSmokeImports:
         from src.libs import evaluator
         assert evaluator is not None
 
+    def test_import_libs_answer_generator(self) -> None:
+        """Test that the libs.answer_generator subpackage can be imported."""
+        from src.libs import answer_generator
+        assert answer_generator is not None
+        assert hasattr(answer_generator, "AnswerGeneratorFactory")
+
     def test_import_libs_llm(self) -> None:
         """Test that the libs.llm subpackage can be imported."""
         from src.libs import llm

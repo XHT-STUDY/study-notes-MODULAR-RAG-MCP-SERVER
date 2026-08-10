@@ -80,6 +80,7 @@ def test_load_settings_success(tmp_path: Path) -> None:
     assert settings.evaluation.metrics == ["hit_rate", "mrr"]
     assert settings.observability.log_level == "INFO"
     assert settings.ingestion is not None
+    assert settings.answer_generator is None
 
 
 def test_missing_required_field_raises_error(tmp_path: Path) -> None:
@@ -138,6 +139,9 @@ def test_load_example_template_has_no_secrets(clean_env: None) -> None:
     assert settings.embedding.api_key is None
     assert settings.vision_llm is not None
     assert settings.vision_llm.api_key is None
+    assert settings.answer_generator is not None
+    assert settings.answer_generator.provider == "extractive"
+    assert settings.answer_generator.enabled is True
 
 
 def test_env_overrides_yaml_api_key(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:

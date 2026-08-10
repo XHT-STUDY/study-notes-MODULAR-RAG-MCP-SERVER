@@ -32,6 +32,87 @@
 
 ---
 
+## Phase 2 — 生成式问答链路（2026-08-10）
+
+### 1. 本次开发了哪些内容
+
+按 `gaizao_plan.md` §5 交付 Phase 2「生成式问答链路」，补上"检索之后无生成"的算法缺口，且无 key 也能跑（extractive 离线模式）。用户拍板：模块放 `src/libs/answer_generator/`（与既有 6 个可插拔库一致，而非方案 §5 的 `src/core/rag/`）；`answer_generator.enabled` 默认 true、provider 默认 `extractive`。
+
+- **新增 `src/libs/answer_generator/` 包（6 文件）**：
+  - `base_answer_generator.py`：`Answer` dataclass（content/citations/confidence/refusal_reason）+ `BaseAnswerGenerator` ABC + `NoneAnswerGenerator` 降级 + 三条通用规则助手（无结果 refusal / 低置信提示 / grounding 校验）+ `extract_citation_indices`/`sanitize_citation_markers`。
+  - `extractive_answer_generator.py`：默认离线生成器——jieba 关键词（复用 `DEFAULT_STOPWORDS`）→ 关键句抽取 → `[n]` 引用要点列表；confidence = 检索 top score。
+  - `llm_answer_generator.py`：懒创建 LLM（复用 `LLMFactory.create`）+ grounding prompt + 越界引用剔除 + 无 key/异常/无有效引用静默降级 extractive。
+  - `template_answer_generator.py`：固定模板（基线/测试）。
+  - `answer_generator_factory.py`：照抄 `EvaluatorFactory` 模板（`_PROVIDERS` + `_LAZY_PROVIDERS` 预留 + enabled=false/none → NoneAnswerGenerator）。
+  - `__init__.py`：re-export + 包级注册 provider（镜像 `llm/__init__.py`）。
+- **`src/core/settings.py`**：新增 `AnswerGeneratorSettings` frozen dataclass + `Settings.answer_generator` 可选块（`if "answer_generator" in data` 分支，缺失用默认值，向后兼容）。
+- **两份 YAML**（`config/settings.yaml` + `.example`）：追加 `answer_generator:` 段（enabled/provider/model/temperature/max_tokens/confidence_threshold/max_chunks）。
+- **`src/core/response/response_builder.py`**：`MCPToolResponse` 加 `answer/confidence/refusal_reason` 字段；`to_dict()`/`to_mcp_content()` 按 None 省略新键（无 answer 时 wire 输出逐字节不变）；JSON 块条件补 `or self.answer`。
+- **`src/mcp_server/tools/query_knowledge_hub.py`**：`execute()` 检索后、build 前调 answer_generator（`asyncio.to_thread` 包裹 + `trace.record_stage("answer_generation")`）；`_attach_answer` 前置 `## 回答` 段落到 content；`__init__` 可注入 generator 便于测试。
+- **`scripts/query.py`**：`--no-answer` flag + ANSWER 段落打印 + confidence/refusal 显示。
+- **测试**：7 个新 unit 测试文件（47 用例）+ 更新 3 个既有测试（config_loading/smoke_imports/response_builder）。
+
+### 2. 测试方法与预期效果
+
+```powershell
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_answer_generator_*.py tests/unit/test_query_knowledge_hub_answer.py tests/unit/test_mcp_tool_response_answer.py -q
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit -m "not llm" -q -p no:cacheprovider
+.\.venv-3.12\Scripts\python.exe -m pytest tests/e2e/test_mcp_client.py -q
+.\.venv-3.12\Scripts\python.exe -m ruff check src/libs/answer_generator/
+.\.venv-3.12\Scripts\python.exe -m mypy --python-version 3.12 src/libs/answer_generator/
+.\.venv-3.12\Scripts\python.exe scripts/self_check.py
+.\.venv-3.12\Scripts\python.exe scripts/query.py --query "什么是混合检索" --top-k 3
+```
+
+**预期效果**：无 key 也能生成答案（extractive 离线）；query_knowledge_hub 返回带 `## 回答` + `[n]` 引用的 MCP 响应；disabled 时行为与 Phase 2 前逐字节一致；LLM 路径失败静默降级不污染主链路。
+
+### 3. 本次改动的原因
+
+| 问题 | 后果 | 解决 |
+|---|---|---|
+| 系统仅检索、不生成 LLM 答案（gaizao_plan 问题 #3） | 用户拿到的是资料片段而非回答 | Phase 2 加 AnswerGenerator 链路 |
+| 无 key 无法演示生成 | 有使用门槛 | 默认 extractive 离线生成器 |
+| `MCPToolResponse` 无 answer 字段 | 无法透传生成结果 | 加 Optional 字段 + None 省略序列化 |
+| LLM 生成失败（无 key/网络/越界引用） | 崩主链路或输出不可信 | 懒创建 + 捕获降级 + grounding 校验 |
+
+### 4. 重点难点
+
+- **向后兼容（最大难点）**：`MCPToolResponse` 加字段必须"None 时序列化省略"，保证 disabled 时 wire 输出与 Phase 2 前逐字节一致；`to_mcp_content` 的 JSON 块条件 `if self.citations or self.metadata` 需补 `or self.answer`，否则有 answer 无 citations 时不序列化——探索阶段发现的隐性坑。
+- **LLM 降级设计**：`LLMFactory.create` 在无 key 时 provider `__init__` 抛 ValueError（qwen_llm），必须在 `_get_llm` 懒创建时捕获并缓存失败，避免长驻进程每次查询重试失败。
+- **grounding 校验**：LLM 输出 `[99]` 越界标记剔除、无有效引用降级 extractive，保证 answer 引用永远落在返回 chunk 上。
+- **置信度策略统一**：extractive/llm 都用 `chunks[0].score`（检索 top score，已归一化 0-1），两条路径可比；低置信只加提示不整段拒绝。
+- **模块位置决策**：用户拍板 `src/libs/answer_generator/`（非方案 §5 的 `src/core/rag/`），与既有 6 个可插拔库架构一致。
+- **测试隔离**：mock LLM 注入（`llm=` 参数）+ monkeypatch `_perform_search`/`_ensure_initialized` + 禁用 `TraceCollector.collect` 落盘。
+
+### 5. 你应该学到什么
+
+- 工厂注册模式的又一实例：照抄 `EvaluatorFactory` 模板（`_PROVIDERS` + `_LAZY_PROVIDERS` + None 降级 + 双入参兼容）。
+- **RAG 的 grounding 原则**：答案引用必须落到检索返回的 chunk，越界引用剔除或降级。
+- **可选块配置扩展**：frozen dataclass 追加带默认值字段 + `from_dict` 里 `if "xxx" in data` 分支，向后兼容。
+- **MCP 响应向后兼容**：新增字段 None 时省略，wire 输出逐字节不变。
+- **fail-safe 降级**：LLM 生成器任何失败（无 key/网络/grounding 失败）静默降级离线 extractive，查询链路永不崩。
+
+### 6. 验证结果与遗留事项
+
+**实测数字**（`.venv-3.12`，CPython 3.12.4）：
+- 新增 unit 测试：**47 passed**（7 文件全绿）。
+- 全量 `pytest tests/unit -m "not llm"`：**1230 passed / 32 failed / 1 skipped**（Phase 2 前基线 1182/32/1；+48 = 47 新用例 + 1 新 smoke import；32 个失败与基线**完全相同**——ragas 18、sparse_encoder 2、trace 2 等既有类目，**零新增回归**）。
+- MCP e2e `test_mcp_client.py`：**6/7 通过**；唯一失败 `test_multiple_tool_calls_same_session` 是 Phase 1 §4 已记录的既有 flaky（突发多调用超 60s 超时，环境相关）。
+- ruff：`src/libs/answer_generator/` + 7 个新测试 **All checks passed**（`ruff --fix` 自动修复 55 处 UP006/UP007/未用导入）；4 个被改既有文件 0 新错误（既有错误为基线风格问题）。
+- mypy：`src/libs/answer_generator/` **Success, no issues found (6 files)**；全量 `mypy src` 仍被既有 numpy 3.12 stub 问题阻断（非本次引入）。
+- `self_check.py`：**9 OK / 0 WARN / 0 FAIL**，Result PASS。
+- 冒烟 `query.py --query "什么是混合检索"`：返回 `## 回答` + 关键句要点（带 `[1]`/`[2]` 引用）+ `confidence=0.03` + `low_confidence` 提示（top score 低属预期行为）。
+- MCP wire 核验：`to_mcp_content()` 2 个块（主文本 + 结构化 JSON），JSON 含 `answer`/`confidence`/`refusalReason` 字段。
+
+**遗留事项**：
+- 未 commit（待用户确认）。
+- `test_multiple_tool_calls_same_session` e2e 超时为既有环境问题。
+- `LLMAnswerGenerator` 的 llm provider 路径未用真实 key 端到端验证（本机 key 可能已失效）；逻辑已用 mock 覆盖。
+- `answer_generator.enabled=true` 默认开启后，`query_knowledge_hub` 输出较之前多了 `## 回答` 段落——语义变化符合 Phase 2 目标；如需严格回归可 `enabled: false`。
+- 真实 key 仍在 git 历史，需用户轮换（沿用 Phase 0 提醒）。
+
+---
+
 ## Phase 0 优化 — 配置去重：.env 生效并接管密钥（2026-08-07）
 
 ### 1. 本次开发了哪些内容

@@ -48,6 +48,7 @@ from src.core.query_engine.sparse_retriever import create_sparse_retriever
 from src.core.query_engine.reranker import create_core_reranker
 from src.core.trace import TraceContext, TraceCollector
 from src.ingestion.storage.bm25_indexer import BM25Indexer
+from src.libs.answer_generator import AnswerGeneratorFactory
 from src.libs.embedding.embedding_factory import EmbeddingFactory
 from src.libs.vector_store.vector_store_factory import VectorStoreFactory
 from src.observability.logger import get_logger
@@ -92,6 +93,12 @@ def parse_args() -> argparse.Namespace:
         "--no-rerank",
         action="store_true",
         help="Disable reranking even if enabled in settings"
+    )
+
+    parser.add_argument(
+        "--no-answer",
+        action="store_true",
+        help="Skip answer generation (retrieval-only, for baseline comparison)"
     )
 
     parser.add_argument(
@@ -174,6 +181,7 @@ def _run_query(
     top_k: Optional[int],
     use_rerank: bool,
     verbose: bool,
+    answer_generator=None,
 ) -> int:
     trace = TraceContext(trace_type="query")
     trace.metadata["query"] = query[:200]
@@ -234,6 +242,23 @@ def _run_query(
     elif verbose and not reranker.is_enabled:
         print("[INFO] Reranking disabled by settings.")
 
+    # Generate answer on top of retrieval results (Phase 2)
+    if answer_generator is not None and answer_generator.is_enabled and results:
+        try:
+            answer = answer_generator.generate(query=query, chunks=results, trace=trace)
+            if answer and answer.content:
+                print("\n" + "=" * 60)
+                print("ANSWER")
+                print("=" * 60)
+                print(answer.content)
+                if answer.confidence:
+                    print(f"\nconfidence={answer.confidence:.2f}")
+                if answer.refusal_reason:
+                    print(f"[REFUSED] {answer.refusal_reason}")
+                print("=" * 60)
+        except Exception as e:
+            print(f"[WARN] Answer generation failed: {e}")
+
     _print_results(results, top_k=effective_top_k)
     TraceCollector().collect(trace)
     return 0
@@ -267,6 +292,15 @@ def main() -> int:
 
     use_rerank = not args.no_rerank
 
+    # Build the answer generator (NoneAnswerGenerator when disabled). Failures
+    # building it (e.g. missing config) degrade to retrieval-only output.
+    answer_generator = None
+    if not args.no_answer:
+        try:
+            answer_generator = AnswerGeneratorFactory.create(settings)
+        except Exception as e:
+            print(f"[WARN] Answer generator unavailable: {e}")
+
     # Single-query mode
     return _run_query(
         hybrid_search=hybrid_search,
@@ -275,6 +309,7 @@ def main() -> int:
         top_k=args.top_k,
         use_rerank=use_rerank,
         verbose=args.verbose,
+        answer_generator=answer_generator,
     )
 
 

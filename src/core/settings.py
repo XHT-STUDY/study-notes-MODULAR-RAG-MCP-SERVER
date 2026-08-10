@@ -195,6 +195,25 @@ class IngestionSettings:
 
 
 @dataclass(frozen=True)
+class AnswerGeneratorSettings:
+    """Configuration for the generative Q&A layer (Phase 2).
+
+    ``provider`` values: ``extractive`` (offline, no key), ``llm`` (reuses the
+    ``llm`` section via LLMFactory), ``template`` (baseline/tests), ``none``.
+    ``enabled=false`` (or ``provider: none/disabled``) returns a
+    ``NoneAnswerGenerator`` so the query chain stays retrieval-only.
+    """
+
+    enabled: bool
+    provider: str
+    model: str = ""
+    temperature: float = 0.0
+    max_tokens: int = 1024
+    confidence_threshold: float = 0.5
+    max_chunks: int = 3
+
+
+@dataclass(frozen=True)
 class Settings:
     llm: LLMSettings
     embedding: EmbeddingSettings
@@ -205,6 +224,7 @@ class Settings:
     observability: ObservabilitySettings
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
+    answer_generator: Optional[AnswerGeneratorSettings] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -244,6 +264,35 @@ class Settings:
                 azure_endpoint=_optional(vision_llm.get("azure_endpoint")),
                 deployment_name=_optional(vision_llm.get("deployment_name")),
                 base_url=_optional(vision_llm.get("base_url")),
+            )
+
+        answer_generator_settings = None
+        if "answer_generator" in data:
+            ag = _require_mapping(data, "answer_generator", "settings")
+            answer_generator_settings = AnswerGeneratorSettings(
+                enabled=_require_bool(ag, "enabled", "answer_generator"),
+                provider=_require_str(ag, "provider", "answer_generator"),
+                model=str(ag.get("model", "") or ""),
+                temperature=(
+                    _require_number(ag, "temperature", "answer_generator")
+                    if "temperature" in ag
+                    else 0.0
+                ),
+                max_tokens=(
+                    _require_int(ag, "max_tokens", "answer_generator")
+                    if "max_tokens" in ag
+                    else 1024
+                ),
+                confidence_threshold=(
+                    _require_number(ag, "confidence_threshold", "answer_generator")
+                    if "confidence_threshold" in ag
+                    else 0.5
+                ),
+                max_chunks=(
+                    _require_int(ag, "max_chunks", "answer_generator")
+                    if "max_chunks" in ag
+                    else 3
+                ),
             )
 
         settings = cls(
@@ -298,6 +347,7 @@ class Settings:
             ),
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
+            answer_generator=answer_generator_settings,
         )
 
         return settings

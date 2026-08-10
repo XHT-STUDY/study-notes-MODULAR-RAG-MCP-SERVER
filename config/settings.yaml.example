@@ -103,6 +103,18 @@ ingestion:
     use_llm: true
 
 # =============================================================================
+# Answer Generator Configuration（Phase 2 生成式问答）
+# =============================================================================
+answer_generator:
+  enabled: true          # false → NoneAnswerGenerator，保持检索-only
+  provider: "extractive" # extractive（无 key 离线）| llm（复用 llm 配置，需密钥）| template（基线/测试）| none
+  model: ""              # 可覆盖 llm.model；留空用 settings.llm.model（仅 llm provider 生效）
+  temperature: 0.0
+  max_tokens: 1024
+  confidence_threshold: 0.5   # 低于此值 → answer 追加"资料不足"提示 + confidence 降级
+  max_chunks: 3               # 参与生成的 top chunk 数
+
+# =============================================================================
 # Agentic RAG（Phase 6 预留，默认关闭；启用后走 Agent 循环而非直通检索）
 # 对应 src/core/settings.py 的 AgentSettings 可选块，完整 schema 见 §9.4。
 # =============================================================================

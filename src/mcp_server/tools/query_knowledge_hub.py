@@ -25,6 +25,8 @@ from src.core.response.response_builder import ResponseBuilder, MCPToolResponse
 from src.core.settings import load_settings, resolve_path, Settings
 from src.core.trace import TraceContext, TraceCollector
 from src.core.types import RetrievalResult
+from src.libs.answer_generator import AnswerGeneratorFactory, NoneAnswerGenerator
+from src.libs.answer_generator.base_answer_generator import BaseAnswerGenerator, Answer
 
 if TYPE_CHECKING:
     from src.core.query_engine.hybrid_search import HybridSearch
@@ -109,15 +111,19 @@ class QueryKnowledgeHubTool:
         hybrid_search: Optional[HybridSearch] = None,
         reranker: Optional[CoreReranker] = None,
         response_builder: Optional[ResponseBuilder] = None,
+        answer_generator: Optional[BaseAnswerGenerator] = None,
     ) -> None:
         """Initialize QueryKnowledgeHubTool.
-        
+
         Args:
             settings: Application settings. If None, loaded from default path.
             config: Tool configuration. If None, uses defaults.
             hybrid_search: Optional pre-configured HybridSearch instance.
             reranker: Optional pre-configured CoreReranker instance.
             response_builder: Optional pre-configured ResponseBuilder instance.
+            answer_generator: Optional answer generator instance. Injected
+                instances (e.g. test mocks) take precedence; otherwise built
+                from ``settings.answer_generator`` on first use.
         """
         self._settings = settings
         self.config = config or QueryKnowledgeHubConfig()
@@ -125,11 +131,31 @@ class QueryKnowledgeHubTool:
         self._reranker = reranker
         self._embedding_client = None
         self._response_builder = response_builder or ResponseBuilder()
-        
+        self._answer_generator = answer_generator
+
         # Track initialization state
         self._initialized = False
         self._current_collection: Optional[str] = None
-    
+
+    def _get_answer_generator(self) -> Optional[BaseAnswerGenerator]:
+        """Return the configured answer generator, or None when disabled.
+
+        Disabled (``answer_generator.enabled=false`` or missing section) yields
+        ``None`` so ``execute()`` leaves the response retrieval-only, matching
+        pre-Phase 2 behavior exactly.
+        """
+        if self._answer_generator is None:
+            ag_settings = getattr(self.settings, "answer_generator", None)
+            if ag_settings is not None and ag_settings.enabled:
+                self._answer_generator = AnswerGeneratorFactory.create(self.settings)
+            else:
+                self._answer_generator = NoneAnswerGenerator()
+        return (
+            None
+            if isinstance(self._answer_generator, NoneAnswerGenerator)
+            else self._answer_generator
+        )
+
     @property
     def settings(self) -> Settings:
         """Get settings, loading if necessary."""
@@ -280,13 +306,35 @@ class QueryKnowledgeHubTool:
                 results = await asyncio.to_thread(
                     self._apply_rerank, query, results, effective_top_k, trace,
                 )
-            
+
+            # Generate an answer on top of the retrieval results (Phase 2).
+            # Skipped when disabled or no results — keeps empty responses and
+            # retrieval-only behavior byte-identical to pre-Phase 2.
+            answer: Optional[Answer] = None
+            generator = self._get_answer_generator()
+            if generator is not None and results:
+                _answer_t0 = _time.monotonic()
+                answer = await asyncio.to_thread(
+                    generator.generate, query, results, trace,
+                )
+                _answer_elapsed = (_time.monotonic() - _answer_t0) * 1000.0
+                trace.record_stage("answer_generation", {
+                    "provider": type(generator).__name__,
+                    "confidence": answer.confidence,
+                    "refusal_reason": answer.refusal_reason,
+                    "result_count": len(results),
+                }, elapsed_ms=_answer_elapsed)
+
             # Build response
             response = self._response_builder.build(
                 results=results,
                 query=query,
                 collection=effective_collection,
             )
+
+            # Attach the generated answer (prepended to the content) if any.
+            if answer is not None:
+                self._attach_answer(response, answer)
             
             # Store final results in trace for dashboard display
             trace.metadata["final_results"] = [
@@ -313,7 +361,29 @@ class QueryKnowledgeHubTool:
             TraceCollector().collect(trace)
             # Return error response
             return self._build_error_response(query, effective_collection, str(e))
-    
+
+    def _attach_answer(self, response: MCPToolResponse, answer: Answer) -> None:
+        """Merge a generated answer into the MCPToolResponse.
+
+        The answer section (with ``[n]`` citations) is prepended to the content
+        so it reads before the existing "## 检索结果" section. Refusal is
+        recorded under a non-``error`` metadata key so the handler keeps
+        ``isError=False``.
+        """
+        if not answer or not answer.content:
+            return
+        response.content = (
+            f"## 回答\n\n{answer.content.strip()}\n\n---\n\n" + response.content
+        )
+        response.answer = answer.content
+        response.confidence = answer.confidence
+        response.refusal_reason = answer.refusal_reason
+        if answer.refusal_reason:
+            response.metadata["answer_refused"] = True
+        if answer.citations:
+            # Same [n] numbering as the response builder — idempotent override.
+            response.citations = answer.citations
+
     def _perform_search(
         self,
         query: str,

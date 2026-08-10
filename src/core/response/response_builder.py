@@ -34,25 +34,36 @@ class MCPToolResponse:
     metadata: Dict[str, Any] = field(default_factory=dict)
     is_empty: bool = False
     image_contents: List[types.ImageContent] = field(default_factory=list)
-    
+    answer: Optional[str] = None
+    confidence: Optional[float] = None
+    refusal_reason: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for MCP protocol.
-        
+
         Returns:
             Dictionary with 'content' and 'structuredContent' fields.
         """
+        structured: Dict[str, Any] = {
+            "citations": [c.to_dict() for c in self.citations],
+            "metadata": self.metadata,
+            "isEmpty": self.is_empty,
+        }
+        # Include generative answer fields only when present (backward compatible).
+        if self.answer is not None:
+            structured["answer"] = self.answer
+        if self.confidence is not None:
+            structured["confidence"] = self.confidence
+        if self.refusal_reason is not None:
+            structured["refusalReason"] = self.refusal_reason
         return {
             "content": self.content,
-            "structuredContent": {
-                "citations": [c.to_dict() for c in self.citations],
-                "metadata": self.metadata,
-                "isEmpty": self.is_empty,
-            }
+            "structuredContent": structured,
         }
-    
+
     def to_mcp_content(self) -> List[Union[types.TextContent, types.ImageContent]]:
         """Convert to MCP content blocks format.
-        
+
         Returns:
             List of content blocks for MCP CallToolResult.
             Includes TextContent and optionally ImageContent blocks.
@@ -63,13 +74,13 @@ class MCPToolResponse:
                 text=self.content,
             )
         ]
-        
+
         # Add image blocks if present (multimodal response)
         if self.image_contents:
             blocks.extend(self.image_contents)
-        
+
         # Add structured data as a separate text block (JSON format)
-        if self.citations or self.metadata:
+        if self.citations or self.metadata or self.answer:
             import json
             structured = {
                 "citations": [c.to_dict() for c in self.citations],
@@ -77,6 +88,12 @@ class MCPToolResponse:
                 "has_images": len(self.image_contents) > 0,
                 "image_count": len(self.image_contents),
             }
+            if self.answer is not None:
+                structured["answer"] = self.answer
+            if self.confidence is not None:
+                structured["confidence"] = self.confidence
+            if self.refusal_reason is not None:
+                structured["refusalReason"] = self.refusal_reason
             blocks.append(
                 types.TextContent(
                     type="text",
