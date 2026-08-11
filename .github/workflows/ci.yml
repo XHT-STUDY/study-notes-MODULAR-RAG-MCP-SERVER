@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.x"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Sync dependencies (locked)
+        run: uv sync --locked --extra dev
+
+      - name: Environment self-check
+        run: python scripts/self_check.py --json
+
+      - name: Prompt templates verify
+        run: python scripts/prompts.py --verify
+
+      - name: Ruff (Phase 5 files)
+        run: ruff check src/core/prompts.py scripts/prompts.py tests/unit/test_prompt_registry.py
+
+      - name: Tests (no LLM)
+        run: python -m pytest -m "not llm"

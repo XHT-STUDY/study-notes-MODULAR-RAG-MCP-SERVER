@@ -2,7 +2,7 @@
 
 This module implements reranking using Large Language Models to evaluate
 the relevance of candidate passages to a given query. It reads prompts from
-config/prompts/rerank.txt and structures LLM outputs for downstream processing.
+prompts/rerank.md and structures LLM outputs for downstream processing.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.core.settings import resolve_path
+from src.core.prompts import get_prompt_text, resolve_prompt_path
 from src.libs.llm.base_llm import BaseLLM, Message
 from src.libs.llm.llm_factory import LLMFactory
 from src.libs.reranker.base_reranker import BaseReranker
@@ -48,13 +48,15 @@ class LLMReranker(BaseReranker):
         Args:
             settings: Application settings containing LLM and rerank configuration.
             prompt_path: Optional path to rerank prompt file. If None, uses default
-                'config/prompts/rerank.txt'. Used for testing to inject custom prompts.
+                'prompts/rerank.md'. Used for testing to inject custom prompts.
             llm: Optional LLM instance. If None, creates via LLMFactory from settings.
                 Used for testing to inject mock LLMs.
             **kwargs: Additional provider-specific parameters.
         """
         self.settings = settings
-        self.prompt_path = prompt_path or str(resolve_path("config/prompts/rerank.txt"))
+        self.prompt_path = prompt_path or str(
+            resolve_prompt_path("rerank", getattr(settings, "prompts", None))
+        )
         self.llm = llm or LLMFactory.create(settings)
         self.kwargs = kwargs
         
@@ -66,22 +68,17 @@ class LLMReranker(BaseReranker):
     
     def _load_prompt_template(self, path: str) -> str:
         """Load the rerank prompt template from file.
-        
+
         Args:
             path: Path to the prompt template file.
-        
+
         Returns:
             The prompt template as a string.
-        
+
         Raises:
             FileNotFoundError: If prompt file doesn't exist.
-            IOError: If file can't be read.
         """
-        prompt_file = Path(path)
-        if not prompt_file.exists():
-            raise FileNotFoundError(f"Rerank prompt file not found: {path}")
-        
-        return prompt_file.read_text(encoding="utf-8")
+        return get_prompt_text("rerank", path=Path(path))
     
     def _build_rerank_prompt(self, query: str, candidates: List[Dict[str, Any]]) -> str:
         """Build the reranking prompt with query and candidates.

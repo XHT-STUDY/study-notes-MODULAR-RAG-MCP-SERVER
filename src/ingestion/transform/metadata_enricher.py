@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
-from src.core.settings import Settings, resolve_path
+from src.core.prompts import get_prompt_text, resolve_prompt_path
+from src.core.settings import Settings
 from src.core.types import Chunk
 from src.core.trace.trace_context import TraceContext
 from src.ingestion.transform.base_transform import BaseTransform
@@ -59,7 +60,9 @@ class MetadataEnricher(BaseTransform):
         self.settings = settings
         self._llm = llm
         self._prompt_template: Optional[str] = None
-        self._prompt_path = prompt_path or str(resolve_path("config/prompts/metadata_enrichment.txt"))
+        self._prompt_path = prompt_path or str(
+            resolve_prompt_path("metadata_enrichment", getattr(settings, "prompts", None))
+        )
         
         # Determine if LLM should be used
         enricher_config = {}
@@ -512,23 +515,21 @@ class MetadataEnricher(BaseTransform):
     
     def _load_prompt(self) -> str:
         """Load prompt template from file.
-        
+
         Returns:
             Prompt template string
-            
+
         Raises:
             FileNotFoundError: If prompt file doesn't exist
         """
         if self._prompt_template is not None:
             return self._prompt_template
-        
-        prompt_path = Path(self._prompt_path)
-        if not prompt_path.exists():
-            raise FileNotFoundError(f"Prompt file not found: {self._prompt_path}")
-        
-        self._prompt_template = prompt_path.read_text(encoding='utf-8')
+
+        self._prompt_template = get_prompt_text(
+            "metadata_enrichment", path=Path(self._prompt_path)
+        )
         logger.info(f"Loaded metadata enrichment prompt from {self._prompt_path}")
-        
+
         return self._prompt_template
     
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:

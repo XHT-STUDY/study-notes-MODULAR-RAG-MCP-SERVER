@@ -5,7 +5,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from src.core.settings import Settings, resolve_path
+from src.core.prompts import get_prompt_text, resolve_prompt_path
+from src.core.settings import Settings
 from src.core.types import Chunk
 from src.core.trace.trace_context import TraceContext
 from src.ingestion.transform.base_transform import BaseTransform
@@ -53,7 +54,9 @@ class ChunkRefiner(BaseTransform):
         self.settings = settings
         self._llm = llm
         self._prompt_template: Optional[str] = None
-        self._prompt_path = prompt_path or str(resolve_path("config/prompts/chunk_refinement.txt"))
+        self._prompt_path = prompt_path or str(
+            resolve_prompt_path("chunk_refinement", getattr(settings, "prompts", None))
+        )
         
         # Determine if LLM should be used
         self.use_llm = getattr(
@@ -397,23 +400,23 @@ class ChunkRefiner(BaseTransform):
     
     def _load_prompt(self) -> Optional[str]:
         """Load prompt template from file.
-        
+
         Returns:
             Prompt template string, or None if file not found
         """
         if self._prompt_template is not None:
             return self._prompt_template
-        
+
         try:
-            prompt_path = Path(self._prompt_path)
-            if not prompt_path.exists():
-                logger.warning(f"Prompt file not found: {self._prompt_path}")
-                return None
-            
-            self._prompt_template = prompt_path.read_text(encoding='utf-8')
+            self._prompt_template = get_prompt_text(
+                "chunk_refinement", path=Path(self._prompt_path)
+            )
             logger.debug(f"Loaded prompt template from {self._prompt_path}")
             return self._prompt_template
-            
+
+        except FileNotFoundError:
+            logger.warning(f"Prompt file not found: {self._prompt_path}")
+            return None
         except Exception as e:
             logger.error(f"Failed to load prompt template: {e}")
             return None

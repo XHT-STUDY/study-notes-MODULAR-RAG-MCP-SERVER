@@ -217,6 +217,25 @@ class AnswerGeneratorSettings:
 
 
 @dataclass(frozen=True)
+class PromptsSettings:
+    """Role → prompt file name mapping (without the ``.md`` extension).
+
+    ``None`` (or an absent key) falls back to the role name as the default
+    file name, e.g. role ``chunk_refinement`` → ``prompts/chunk_refinement.md``.
+    """
+
+    chunk_refinement: Optional[str] = None
+    metadata_enrichment: Optional[str] = None
+    image_captioning: Optional[str] = None
+    rerank: Optional[str] = None
+
+    def resolve(self, role: str) -> str:
+        """Resolve a role name to its configured prompt file stem."""
+        value = getattr(self, role, None)
+        return value or role
+
+
+@dataclass(frozen=True)
 class Settings:
     llm: LLMSettings
     embedding: EmbeddingSettings
@@ -228,6 +247,7 @@ class Settings:
     ingestion: Optional[IngestionSettings] = None
     vision_llm: Optional[VisionLLMSettings] = None
     answer_generator: Optional[AnswerGeneratorSettings] = None
+    prompts: Optional[PromptsSettings] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -298,6 +318,16 @@ class Settings:
                 ),
             )
 
+        prompts_settings = None
+        if "prompts" in data:
+            prompts_map = _require_mapping(data, "prompts", "settings")
+            prompts_settings = PromptsSettings(
+                chunk_refinement=_optional(prompts_map.get("chunk_refinement")),
+                metadata_enrichment=_optional(prompts_map.get("metadata_enrichment")),
+                image_captioning=_optional(prompts_map.get("image_captioning")),
+                rerank=_optional(prompts_map.get("rerank")),
+            )
+
         settings = cls(
             llm=LLMSettings(
                 provider=_require_str(llm, "provider", "llm"),
@@ -356,6 +386,7 @@ class Settings:
             ingestion=ingestion_settings,
             vision_llm=vision_llm_settings,
             answer_generator=answer_generator_settings,
+            prompts=prompts_settings,
         )
 
         return settings

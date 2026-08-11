@@ -9,6 +9,8 @@
 - [项目概述](#-项目概述)
 - [分支说明](#-分支说明)
 - [快速开始](#-快速开始)
+- [系统架构](#-系统架构architecture)
+- [配置说明](#-配置说明)
 - [谁适合用这个项目 & 怎么用](#-谁适合用这个项目--怎么用)
 - [简历参考](#-简历参考)
 - [常见问题](#-常见问题)
@@ -62,6 +64,73 @@
 **🧪 三层测试体系**：Unit / Integration / E2E 分层测试，覆盖独立模块逻辑、模块间交互、完整链路（MCP Client / Dashboard）。
 
 **🤖 Skill 驱动全流程**：内置 auto-coder（自动编码）、qa-tester（自动测试）、package（清理打包）、setup（一键配置）等 Agent Skill，覆盖从代码编写到测试、打包、部署的完整开发生命周期。每个 Skill 的使用方法和设计思路在笔记的项目部分均有讲解视频，可参考学习。
+
+### 系统架构（Architecture）
+
+```mermaid
+flowchart TB
+    subgraph Client["客户端层"]
+        MC[MCP Client<br/>Copilot / Claude Desktop]
+        DB[Streamlit Dashboard]
+    end
+
+    subgraph MCP["MCP 接入层 src/mcp_server"]
+        PH[protocol_handler]
+        TQ[query_knowledge_hub]
+        TL[list_collections]
+        TS[get_document_summary]
+    end
+
+    subgraph Core["核心层 src/core"]
+        ST[Settings / Prompts]
+        QE[Query Engine<br/>混合检索 + RRF 融合]
+        RB[Response Builder<br/>Markdown + [n] 引用 + ImageContent]
+        TR[TraceContext]
+    end
+
+    subgraph Ingestion["摄取层 src/ingestion"]
+        PL[Pipeline<br/>校验→加载→分块→变换→编码→存储]
+        PT[prompts/*.md<br/>版本化 Prompt]
+    end
+
+    subgraph Libs["可插拔组件 src/libs（工厂注册）"]
+        L1[LLM]
+        L2[Embedding]
+        L3[Reranker]
+        L4[Splitter]
+        L5[VectorStore]
+        L6[Evaluator]
+    end
+
+    subgraph Obv["可观测 src/observability"]
+        OB[Logger / 评估 / 仪表盘]
+    end
+
+    subgraph Store["数据存储 data/"]
+        S1[(ChromaDB)]
+        S2[(BM25 JSON 索引)]
+        S3[(SQLite 摄取历史)]
+        S4[(图片 / 版本快照)]
+        S5[(logs/traces.jsonl)]
+    end
+
+    MC --> PH
+    DB --> PH
+    DB --> Obv
+    PH --> TQ & TL & TS
+    TQ --> QE
+    QE --> RB
+    QE --> TR
+    PL --> PT
+    PL --> L1 & L2 & L3 & L4 & L5
+    QE --> L3
+    QE --> L5
+    L5 --> S1
+    L2 --> S2
+    PL --> S3 & S4
+    TR --> S5
+    Obv --> S5
+```
 
 > 📖 详细架构设计、模块说明和任务排期请参阅 [DEV_SPEC.md](DEV_SPEC.md)
 
@@ -139,6 +208,7 @@ cd MODULAR-RAG-MCP-SERVER
 uv venv .venv --python 3.12
 uv sync --locked              # 严格按 uv.lock 安装，环境可复现
 python scripts/self_check.py  # 环境自检，期望全绿（退出码 0）
+python scripts/prompts.py --verify  # Prompt 模板 checksum 校验（退出码 0）
 ```
 
 ### 4. 配置 API Key（可选；纯检索可跳过）
@@ -154,6 +224,67 @@ export VISION_API_KEY=sk-xxx
 也可以使用交互式 **Setup Skill**（在 VS Code 中通过 Copilot / Claude 对话框输入 `setup`）完成 Provider 选择 → API Key 配置 → Dashboard 启动。
 
 > 💡 如果不熟悉 Skill 的使用方式，请观看配套笔记中的 **Setup Skill 使用讲解视频**。
+
+> 🔧 密钥注入方式、各配置块含义、Provider 切换与 Prompt 模板维护，见 [配置说明](#-配置说明)。
+
+---
+
+## ⚙️ 配置说明
+
+### 1. 配置优先级
+
+**进程环境变量 > `config/.env` > `config/settings.yaml`**。
+
+- 只在白名单内的字段支持环境变量覆盖（见 `src/core/settings.py` 的 `_ENV_OVERRIDES`，密钥类字段如 `LLM_API_KEY` / `EMBEDDING_API_KEY` / `VISION_API_KEY`）。
+- `load_settings()` 自动加载 `config/.env`（不存在则跳过）。
+- 不要在 git 追踪的文件里写真实密钥——把密钥放 `config/.env`（已 gitignore）或直接 export。
+
+### 2. 配置块一览
+
+`config/settings.yaml.example` 是唯一权威模板，包含以下块（字段均带注释）：
+
+| 配置块 | 作用 | 关键字段 |
+|---|---|---|
+| `llm` | 文本 LLM（摄取变换、重排） | `provider` / `model` / `base_url` / `api_key` |
+| `embedding` | 稠密向量编码 | `provider` / `model` / `dimensions` |
+| `vision_llm` | 图片描述 Vision LLM | `provider` / `model` / `max_image_size` |
+| `vector_store` | 向量库（ChromaDB） | `provider` / `persist_directory` / `collection_name` |
+| `retrieval` | 检索参数 | `dense_top_k` / `sparse_top_k` / `fusion_top_k` / `rrf_k` |
+| `rerank` | 精排开关与模型 | `enabled` / `provider` / `top_k` |
+| `evaluation` | 评估体系 | `enabled` / `provider` / `metrics` |
+| `observability` | 日志与追踪 | `log_level` / `trace_enabled` / `trace_file` |
+| `ingestion` | 分块与批处理 | `chunk_size` / `chunk_overlap` / `splitter` / `batch_size` |
+| `answer_generator` | 回答生成（当前仅检索，无 LLM 生成） | `provider` / `enabled` |
+| `prompts` | Prompt 模板文件名映射（Phase 5） | `chunk_refinement` / `metadata_enrichment` / `image_captioning` / `rerank` |
+
+### 3. Provider 切换（零代码）
+
+改 `provider` 字段 + 用环境变量注入 `base_url` / `api_key` 即可换后端，无需改代码。示例——切到本地 Ollama：
+
+```bash
+export EMBEDDING_BASE_URL=http://localhost:11434/v1
+export EMBEDDING_API_KEY=ollama
+# settings.yaml:  embedding.provider = ollama
+```
+
+可插拔清单：LLM / Embedding / Reranker / Splitter / VectorStore / Evaluator（工厂注册模式，`src/libs/*`）。
+
+### 4. Prompt 模板（版本化）
+
+Prompt 模板位于根目录 `prompts/*.md`，带 YAML frontmatter（`name` / `version` / `description` / `checksum` / `updated_at`）：
+
+- **改正文后**必须回填 checksum：`python scripts/prompts.py --update-checksums`，然后提交（`git diff` 同时显示正文变更 + 一行 checksum）。
+- **CI 门禁**：`python scripts/prompts.py --verify` 严格校验全部模板（checksum 不匹配 → exit 1）。
+- 若想给某个角色换模板名（不换默认文件），在 `config/settings.yaml` 的 `prompts:` 块映射，如 `chunk_refinement: my_custom_prompt` → 加载 `prompts/my_custom_prompt.md`。
+
+### 5. 覆盖缺口（env 不可用）
+
+以下配置项**没有**环境变量覆盖，只能写进 `config/settings.yaml`：
+
+- `vision_llm` 的 `azure_endpoint` / `deployment_name` / `api_version`（Azure Vision 专用）
+- `prompts` 块的各角色文件名映射
+
+> 💡 配置相关的技能：可在 VS Code 中通过 Copilot / Claude 对话框输入 `setup`，用交互式 Setup Skill 完成 Provider 选择 → API Key 配置 → Dashboard 启动。
 
 ---
 

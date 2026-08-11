@@ -32,6 +32,72 @@
 
 ---
 
+## Phase 5 — Prompt 管理 + 文档 + CI（2026-08-10）
+
+### 1. 本次开发了哪些内容
+
+按 `gaizao_plan.md` §8 交付 4 个交付物。用户拍板 4 个决策：**Prompt 模板迁到根目录 `prompts/`**（markdown + YAML frontmatter）；**checksum 加载 mismatch 仅告警** + 独立 `scripts/prompts.py --verify` 硬校验；**CI = uv sync --locked + self_check + pytest -m "not llm" + ruff**（不加 mypy）；**README 保留既有内容只增补**。
+
+- **D1 Prompt 版本化**：
+  - 新建 `src/core/prompts.py` 加载器（`PromptTemplate` frozen dataclass、`PromptRegistry`、`resolve_prompt_path`、`get_prompt_text`）。frontmatter 仅锚定前导 `---`（无前导 `---` 的纯文本文件 → 整文件当正文、跳过 checksum——保住既有 temp-file 测试）；checksum = 正文 sha256，不 trim 不换行归一化；mismatch → `logger.warning` 仍返回正文，`strict=True` → `PromptError`。
+  - `src/core/settings.py` 新增可选 `PromptsSettings`（4 个 role → 文件名映射，`resolve(role)` 缺省回退 role 名）+ `Settings.prompts` 字段，照抄 vision_llm 可选块模板；不加 `_ENV_OVERRIDES`。
+  - `git mv config/prompts/*.txt prompts/*.md`（git 识别为 76-82% 相似 rename，历史保留）→ 前置 frontmatter → `--update-checksums` 回填；`config/prompts/` 已删。
+  - 新建 `scripts/prompts.py` CLI（`--verify` exit 0/1、`--update-checksums` exit 0、无 flag/双 flag exit 2；`main(argv, registry=...)` 可注入）。
+  - 改 4 处消费者，各自保留原错误契约：`chunk_refiner`（缺→None+告警）、`metadata_enricher`（缺→raise FileNotFoundError）、`image_captioner`（补 `prompt_path` ctor 参数；缺→回退硬编码串）、`llm_reranker`（缺→LLMRerankError）。
+- **D2 REPRODUCE.md**：一键路径（`bootstrap.bat --seed` 内部 8 步）、手动等价命令、self_check 9 项语义表、测试/静态命令、CI 一致性说明；与 ONBOARDING.md 交叉链接。
+- **D3 README 增补**：`### 系统架构（Architecture）` mermaid 分层图（客户端→MCP→核心→摄取→可插拔/可观测/存储）、`## ⚙️ 配置说明`（优先级 / 配置块一览 / Provider 切换 / Prompt 模板 / env 覆盖缺口）、TOC + 快速开始轻触 2 处（`--verify` 一行 + 配置说明 cross-ref）。
+- **D4 `.github/workflows/ci.yml`**：`uv sync --locked --extra dev` → `self_check --json` → `prompts.py --verify` → `ruff`（只 scope 新文件，仓库基线 7294 违规不扫）→ `pytest -m "not llm"`。
+
+### 2. 测试方法与预期效果
+
+```powershell
+# Phase 5 相关 7 个测试文件：142 passed（含新 test_prompt_registry 27 / test_image_captioner 4 / test_config_loading 追加 3）
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_prompt_registry.py tests/unit/test_image_captioner.py tests/unit/test_config_loading.py tests/unit/test_chunk_refiner.py tests/unit/test_metadata_enricher_contract.py tests/unit/test_llm_reranker.py tests/unit/test_reranker_factory.py -q   # 142 passed
+.\.venv-3.12\Scripts\ruff.exe check src/core/prompts.py scripts/prompts.py tests/unit/test_prompt_registry.py tests/unit/test_image_captioner.py   # All checks passed
+.\.venv-3.12\Scripts\python.exe scripts/prompts.py --verify     # OK: verified 4 prompt(s), exit 0
+# 篡改测试：prompts/rerank.md 正文改 1 字节 → --verify exit 1；还原 → exit 0
+.\.venv-3.12\Scripts\python.exe scripts/self_check.py            # 9 OK / 0 WARN / 0 HINT / 0 FAIL，Result: PASS，exit 0
+.\.venv-3.12\Scripts\mypy.exe --follow-imports=skip src/core/prompts.py   # Success: no issues
+```
+
+全量回归 `pytest -m "not llm"`：**1498 passed / 28 failed / 29 errors / 8 skipped**。逐一归因并**用 git stash 在 Phase 5 前的基线复跑验证**：7 个 unit 失败（sparse_encoder jieba 分词 `machine-learning`→`machine`/`learning`、batch_processor 计时 0.0、trace_service `KeyError: 'method'`、loader_pdf_contract markitdown 元数据无 `images` 键、list_collections mock 参数）在**基线上同样 7 个失败**——均为既有环境/依赖行为问题，非 Phase 5 引入；其余 28 failed + 29 errors 全部为真实 API（azure/llm/embedding smoke）或 Windows Chroma teardown `PermissionError [WinError 32]`（锁住的 chroma.sqlite3 无法删除）。
+
+### 3. 本次改动的原因
+
+- **Prompt 模板无版本管理**：`config/prompts/*.txt` 无 frontmatter，4 处消费者硬编码路径且错误契约各异（缺文件有的 raise、有的回退）→ 改正文无法追踪、路径散落 → 集中到 `prompts/*.md` + checksum 版本化，消费者统一委托 loader。
+- **环境不可复现的文档缺位**：有 ONBOARDING 但无"与 CI 一致的复现清单" → 新增 REPRODUCE.md。
+- **无 CI**：全靠手动验证 → 新增 GitHub Actions，且 CI 与 REPRODUCE.md 命令等价。
+- **README 无架构图/配置说明**：新读者难以快速理解分层与配置 → 增补（保留既有 462 行营销向内容不动）。
+
+### 4. 重点难点
+
+- **ruff 基线 7294 违规**（W293 5449 / UP006 764 / UP045 416 等）→ CI ruff 必须只 scope 新增文件，否则必红；全仓库清理列为后续债务。
+- **`Mock(spec=Settings).prompts` 是 Mock**：`resolve_prompt_path` 必须 `isinstance(cfg, PromptsSettings)` 守卫，duck-typing 会得到 `<Mock id=…>.md` 路径。
+- **frontmatter 无前导 `---` 视为整文件正文**：保住既有测试注入纯文本 temp 文件的关键；`--update-checksums` 跳过无 frontmatter 文件。
+- **body 字节不归一化**：测试里 `_write` 若加尾部换行会与 checksum 错位（踩坑后改逐字写入）。
+- **`scripts/prompts.py` 的 Windows UTF-8 stdout 包装在 import 时执行会破坏 pytest capsys** → 包装移入 `__main__` 守卫。
+- **metadata_enricher 的 raise 契约**不可被 loader 静默成 None；image_captioner 补 `prompt_path` 参数使 4 个消费者注入对称。
+- **CI 无 key 也全绿**：self_check 第 9 项是 HINT 非阻塞；`settings.yaml` gitignored 在 CI 不存在 → `check_config` 回退 example。
+
+### 5. 你应该学到什么
+
+- **Frontmatter + checksum 的轻量版本化模式**：不改业务代码即可对模板做完整性校验；`--update-checksums` 只动 checksum 行，让 `git diff` 同时展示真实变更与校验位。
+- **加载时 best-effort（告警）+ 独立 verify 硬校验的分层**：运行时不被陈旧 checksum 卡死，CI 用 strict 路径硬失败。
+- **可选 settings 段的模板化**：`Optional[...] = None` + `if key in data:` + `_optional()` 空白→None，新增配置块零风险。
+- **CI 与本地命令等价**：同一份 `uv.lock` + 同款命令 → 本机跑通 ≈ CI 绿灯。
+- **基线对比方法论**：全量回归失败先用 `git stash` 回基线复跑，区分"本次引入"与"既有环境债务"，不背锅也不漏报。
+
+### 6. 验证结果与遗留事项
+
+- **实际数字**：Phase 5 相关 142/142 通过；ruff 0 报错；`--verify` exit 0（篡改 1 字节 → exit 1 → 还原 → 0）；self_check 9 OK exit 0；全量 1498 passed / 28 failed / 29 errors 均为既有环境问题（基线 stash 复跑证实 7 个 unit 失败一致）。
+- **遗留/安全提醒**：
+  - 真实 API key 仍在 git 历史（Phase 0 已知），需用户轮换；本次未向 git 追踪文件写入任何密钥。
+  - 仓库级 ruff 清理（7294 违规）是后续债务，CI 当前只扫 Phase 5 新文件。
+  - `config/settings.yaml` 是本机 local（gitignored），CI 中不存在 → 依赖 example 回退，若未来 CI 需要真实配置需另加 secret 注入。
+  - Phase 6（Agentic RAG）在 `gaizao_plan.md` §9 仍为路线图。
+
+---
+
 ## Phase 4 — 数据版本与更新闭环（2026-08-10）
 
 ### 1. 本次开发了哪些内容

@@ -256,3 +256,118 @@ def test_missing_env_file_is_noop(clean_env: None, tmp_path: Path) -> None:
     settings = load_settings(EXAMPLE_SETTINGS, env_file=tmp_path / "does_not_exist.env")
 
     assert settings.llm.api_key is None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: optional prompts: block (role → file-name mapping)
+# ---------------------------------------------------------------------------
+
+
+def test_prompts_block_custom_names(tmp_path: Path) -> None:
+    """A prompts: block maps roles to custom prompt file names."""
+    config = """
+    llm:
+      provider: openai
+      model: gpt-4o-mini
+      temperature: 0.0
+      max_tokens: 1024
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+      dimensions: 1536
+    vector_store:
+      provider: chroma
+      persist_directory: ./data/db/chroma
+      collection_name: knowledge_hub
+    retrieval:
+      dense_top_k: 20
+      sparse_top_k: 20
+      fusion_top_k: 10
+      rrf_k: 60
+    rerank:
+      enabled: false
+      provider: none
+      model: cross-encoder/ms-marco-MiniLM-L-6-v2
+      top_k: 5
+    evaluation:
+      enabled: false
+      provider: custom
+      metrics:
+        - hit_rate
+    observability:
+      log_level: INFO
+      trace_enabled: true
+      trace_file: ./logs/traces.jsonl
+      structured_logging: true
+    prompts:
+      chunk_refinement: refine_v2
+      rerank: rank_cn
+    """
+    settings_path = tmp_path / "settings.yaml"
+    _write_yaml(settings_path, config)
+
+    settings = load_settings(settings_path)
+
+    assert settings.prompts is not None
+    assert settings.prompts.chunk_refinement == "refine_v2"
+    assert settings.prompts.rerank == "rank_cn"
+    # Unspecified roles fall back to the role name.
+    assert settings.prompts.metadata_enrichment is None
+    assert settings.prompts.resolve("metadata_enrichment") == "metadata_enrichment"
+    assert settings.prompts.resolve("chunk_refinement") == "refine_v2"
+
+
+def test_prompts_absent_is_none(tmp_path: Path) -> None:
+    """Without a prompts: block, settings.prompts is None (no default injection)."""
+    config = """
+    llm:
+      provider: openai
+      model: gpt-4o-mini
+      temperature: 0.0
+      max_tokens: 1024
+    embedding:
+      provider: openai
+      model: text-embedding-3-small
+      dimensions: 1536
+    vector_store:
+      provider: chroma
+      persist_directory: ./data/db/chroma
+      collection_name: knowledge_hub
+    retrieval:
+      dense_top_k: 20
+      sparse_top_k: 20
+      fusion_top_k: 10
+      rrf_k: 60
+    rerank:
+      enabled: false
+      provider: none
+      model: cross-encoder/ms-marco-MiniLM-L-6-v2
+      top_k: 5
+    evaluation:
+      enabled: false
+      provider: custom
+      metrics:
+        - hit_rate
+    observability:
+      log_level: INFO
+      trace_enabled: true
+      trace_file: ./logs/traces.jsonl
+      structured_logging: true
+    """
+    settings_path = tmp_path / "settings.yaml"
+    _write_yaml(settings_path, config)
+
+    settings = load_settings(settings_path)
+
+    assert settings.prompts is None
+
+
+def test_example_template_loads_prompts_defaults(clean_env: None) -> None:
+    """The committed example template carries an active prompts: block with
+    blank (fallback) role names."""
+    settings = load_settings(EXAMPLE_SETTINGS)
+
+    assert settings.prompts is not None
+    assert settings.prompts.chunk_refinement is None
+    assert settings.prompts.rerank is None
+    assert settings.prompts.resolve("image_captioning") == "image_captioning"

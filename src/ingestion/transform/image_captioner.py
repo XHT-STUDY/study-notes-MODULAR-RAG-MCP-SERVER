@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional, Dict
 
+from src.core.prompts import get_prompt_text, resolve_prompt_path
 from src.core.settings import Settings
 from src.core.types import Chunk
 from src.core.trace.trace_context import TraceContext
@@ -44,10 +45,14 @@ class ImageCaptioner(BaseTransform):
     """
     
     def __init__(
-        self, 
-        settings: Settings, 
-        llm: Optional[BaseVisionLLM] = None
+        self,
+        settings: Settings,
+        llm: Optional[BaseVisionLLM] = None,
+        prompt_path: Optional[str] = None,
     ):
+        self._prompt_path = prompt_path or str(
+            resolve_prompt_path("image_captioning", getattr(settings, "prompts", None))
+        )
         self.settings = settings
         self.llm = None
         # Caption cache: image_id -> caption string (thread-safe with lock)
@@ -69,12 +74,16 @@ class ImageCaptioner(BaseTransform):
         
     def _load_prompt(self) -> str:
         """Load the image captioning prompt from configuration."""
-        # Assuming standard relative path. In production, logic might be robust.
-        from src.core.settings import resolve_path
-        prompt_path = resolve_path("config/prompts/image_captioning.txt")
-        if prompt_path.exists():
-            return prompt_path.read_text(encoding="utf-8").strip()
-        return "Describe this image in detail for indexing purposes."
+        try:
+            return get_prompt_text(
+                "image_captioning", path=Path(self._prompt_path)
+            ).strip()
+        except Exception as e:
+            logger.warning(
+                f"Failed to load image captioning prompt ({self._prompt_path}): "
+                f"{e}; using default"
+            )
+            return "Describe this image in detail for indexing purposes."
 
     def _find_referenced_image_ids(self, text: str) -> List[str]:
         """Extract image IDs actually referenced in the chunk text.

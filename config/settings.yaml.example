@@ -134,3 +134,15 @@ answer_generator:
 #     - "query_knowledge_hub"
 #     - "list_collections"
 #     - "get_document_summary"
+
+# =============================================================================
+# Prompt 模板映射（Phase 5）
+# 每个 role → prompts/ 目录下的模板文件名（不含 .md）。留空/省略 = 缺省 role 名。
+# 修改 prompts/*.md 正文后，运行 scripts/prompts.py --update-checksums 回填
+# checksum；scripts/prompts.py --verify 校验（CI 同款）。
+# =============================================================================
+prompts:
+  chunk_refinement: ""       # 缺省 → prompts/chunk_refinement.md
+  metadata_enrichment: ""    # 缺省 → prompts/metadata_enrichment.md
+  image_captioning: ""       # 缺省 → prompts/image_captioning.md
+  rerank: ""                 # 缺省 → prompts/rerank.md（rerank.enabled=false 时不加载）

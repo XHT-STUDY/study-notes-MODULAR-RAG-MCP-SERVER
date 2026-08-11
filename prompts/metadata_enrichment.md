@@ -1,3 +1,10 @@
+---
+name: metadata_enrichment
+version: 1
+description: 从文本块抽取结构化元数据：标题、摘要与标签。
+checksum: e23e194aeaba5e1aba9f928a6a97f37df5e5002283f4e2d4369c9beb82537c97
+updated_at: 2026-08-10
+---
 You are a metadata extraction assistant. Analyze the following text chunk and generate enriched metadata.
 
 Text Chunk:

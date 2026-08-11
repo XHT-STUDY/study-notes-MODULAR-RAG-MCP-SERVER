@@ -64,7 +64,7 @@ data/                本地内嵌存储（ChromaDB / SQLite / BM25 JSON），首
 | Phase 2 | 生成式问答链路 | answer_generator + refusal/confidence/grounding | 路线图 |
 | Phase 3 | 评测闭环 | golden 补齐 + 多指标 + 报告对比 | 路线图 |
 | Phase 4 | 数据版本与更新 | 孤儿 GC + 版本跟踪 + 原子更新 | ✅ 实施 |
-| Phase 5 | Prompt + 文档 + CI | prompt 版本化 + REPRODUCE.md + CI | 路线图 |
+| Phase 5 | Prompt + 文档 + CI | prompt 版本化 + REPRODUCE.md + CI | ✅ 实施 |
 | Phase 6 | Agentic RAG 能力层 | Agent 循环/工具/路由/记忆/反射 | 路线图（前瞻设计，见 §9） |
 
 依赖关系：Phase 2–6 全部依赖 Phase 0 的配置地基（env 优先 + 可扩展 settings）与 Phase 1 的可复现环境。
