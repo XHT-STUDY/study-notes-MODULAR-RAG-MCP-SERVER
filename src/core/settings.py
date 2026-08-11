@@ -85,6 +85,31 @@ def _require_bool(data: Dict[str, Any], key: str, path: str) -> bool:
     return value
 
 
+def _coerce_bool(
+    data: Dict[str, Any], key: str, path: str, default: bool = False
+) -> bool:
+    """Require a boolean, tolerating the raw strings env overrides write.
+
+    ``_apply_env_overrides`` injects whitelisted env vars as strings (e.g.
+    ``AGENT_ENABLED="true"``), so ``_require_bool``'s strict ``isinstance(bool)``
+    would reject them.  This helper accepts a real ``bool`` plus the strings
+    ``"true"/"false"/"1"/"0"`` (case-insensitive) and falls back to *default*
+    when the key is absent — used for ``agent.enabled`` only (Phase 6).
+    """
+    value = data.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1"}:
+            return True
+        if lowered in {"false", "0"}:
+            return False
+    raise SettingsError(f"Expected boolean for field: {path}.{key}")
+
+
 def _require_list(data: Dict[str, Any], key: str, path: str) -> List[Any]:
     value = _require_value(data, key, path)
     if not isinstance(value, list):
@@ -236,6 +261,69 @@ class PromptsSettings:
 
 
 @dataclass(frozen=True)
+class RouterSettings:
+    """Query router config for the agent layer (Phase 6).
+
+    ``provider`` values: ``rule`` (offline keyword/regex routing) or ``llm``
+    (classification prompt).  Disabled → every query routes to direct RAG.
+    """
+
+    enabled: bool = False
+    provider: str = "rule"
+
+
+@dataclass(frozen=True)
+class MemorySettings:
+    """Conversation memory config for the agent layer (Phase 6).
+
+    ``backend`` values: ``none`` (no-op) or ``sqlite`` (windowed recent turns).
+    """
+
+    enabled: bool = False
+    backend: str = "none"
+    window_size: int = 10
+
+
+@dataclass(frozen=True)
+class ReflectionSettings:
+    """Retrieval reflection config for the agent layer (Phase 6).
+
+    When enabled, the loop re-checks whether the retrieved evidence is
+    sufficient and rewrites the query (via ``expanded_terms``) for a second
+    pass, bounded by ``max_retrieval_rounds``.
+    """
+
+    enabled: bool = True
+    max_retrieval_rounds: int = 2
+
+
+@dataclass(frozen=True)
+class AgentSettings:
+    """Configuration for the Agentic RAG layer (Phase 6).
+
+    ``enabled=false`` (default) makes ``agent_query`` degrade to a passthrough
+    retrieval that is byte-identical to ``query_knowledge_hub``.  ``strategy``
+    values: ``react`` (full ReAct loop, default), ``plan_and_execute``,
+    ``self_ask``.  ``tools`` is the whitelist of tool names the agent may call;
+    ``agent_query`` itself is always excluded to prevent recursion.
+    """
+
+    enabled: bool = False
+    strategy: str = "react"
+    max_iterations: int = 5
+    router: Optional[RouterSettings] = None
+    memory: Optional[MemorySettings] = None
+    reflection: Optional[ReflectionSettings] = None
+    tools: List[str] = field(
+        default_factory=lambda: [
+            "query_knowledge_hub",
+            "list_collections",
+            "get_document_summary",
+        ]
+    )
+
+
+@dataclass(frozen=True)
 class Settings:
     llm: LLMSettings
     embedding: EmbeddingSettings
@@ -248,6 +336,7 @@ class Settings:
     vision_llm: Optional[VisionLLMSettings] = None
     answer_generator: Optional[AnswerGeneratorSettings] = None
     prompts: Optional[PromptsSettings] = None
+    agent: Optional[AgentSettings] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Settings":
@@ -328,6 +417,87 @@ class Settings:
                 rerank=_optional(prompts_map.get("rerank")),
             )
 
+        agent_settings = None
+        if "agent" in data:
+            agent = _require_mapping(data, "agent", "settings")
+            router_settings = None
+            if "router" in agent:
+                router_map = _require_mapping(agent, "router", "agent")
+                router_settings = RouterSettings(
+                    enabled=(
+                        _require_bool(router_map, "enabled", "agent.router")
+                        if "enabled" in router_map
+                        else False
+                    ),
+                    provider=(
+                        _require_str(router_map, "provider", "agent.router")
+                        if "provider" in router_map
+                        else "rule"
+                    ),
+                )
+            memory_settings = None
+            if "memory" in agent:
+                memory_map = _require_mapping(agent, "memory", "agent")
+                memory_settings = MemorySettings(
+                    enabled=(
+                        _require_bool(memory_map, "enabled", "agent.memory")
+                        if "enabled" in memory_map
+                        else False
+                    ),
+                    backend=(
+                        _require_str(memory_map, "backend", "agent.memory")
+                        if "backend" in memory_map
+                        else "none"
+                    ),
+                    window_size=(
+                        _require_int(memory_map, "window_size", "agent.memory")
+                        if "window_size" in memory_map
+                        else 10
+                    ),
+                )
+            reflection_settings = None
+            if "reflection" in agent:
+                reflection_map = _require_mapping(agent, "reflection", "agent")
+                reflection_settings = ReflectionSettings(
+                    enabled=(
+                        _require_bool(reflection_map, "enabled", "agent.reflection")
+                        if "enabled" in reflection_map
+                        else True
+                    ),
+                    max_retrieval_rounds=(
+                        _require_int(
+                            reflection_map, "max_retrieval_rounds", "agent.reflection"
+                        )
+                        if "max_retrieval_rounds" in reflection_map
+                        else 2
+                    ),
+                )
+            agent_settings = AgentSettings(
+                enabled=_coerce_bool(agent, "enabled", "agent"),
+                strategy=(
+                    _require_str(agent, "strategy", "agent")
+                    if "strategy" in agent
+                    else "react"
+                ),
+                max_iterations=(
+                    _require_int(agent, "max_iterations", "agent")
+                    if "max_iterations" in agent
+                    else 5
+                ),
+                router=router_settings,
+                memory=memory_settings,
+                reflection=reflection_settings,
+                tools=(
+                    [str(item) for item in _require_list(agent, "tools", "agent")]
+                    if "tools" in agent
+                    else [
+                        "query_knowledge_hub",
+                        "list_collections",
+                        "get_document_summary",
+                    ]
+                ),
+            )
+
         settings = cls(
             llm=LLMSettings(
                 provider=_require_str(llm, "provider", "llm"),
@@ -387,6 +557,7 @@ class Settings:
             vision_llm=vision_llm_settings,
             answer_generator=answer_generator_settings,
             prompts=prompts_settings,
+            agent=agent_settings,
         )
 
         return settings
@@ -413,7 +584,8 @@ def validate_settings(settings: Settings) -> None:
 
 # Environment variable → dotted settings path whitelist.
 # Only security-sensitive / commonly-tweaked keys are mapped; everything else
-# keeps its YAML value. Extend for Phase 6, e.g. "AGENT_ENABLED": "agent.enabled".
+# keeps its YAML value. Phase 6: AGENT_ENABLED flips the agent block's
+# ``enabled`` flag — consumed via _coerce_bool (env writes raw strings).
 _ENV_OVERRIDES: Dict[str, str] = {
     "LLM_API_KEY": "llm.api_key",
     "LLM_BASE_URL": "llm.base_url",
@@ -423,6 +595,7 @@ _ENV_OVERRIDES: Dict[str, str] = {
     "EMBEDDING_MODEL": "embedding.model",
     "VISION_API_KEY": "vision_llm.api_key",
     "VISION_BASE_URL": "vision_llm.base_url",
+    "AGENT_ENABLED": "agent.enabled",
 }
 
 

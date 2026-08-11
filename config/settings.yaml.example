@@ -120,20 +120,21 @@ answer_generator:
   max_chunks: 3               # 参与生成的 top chunk 数
 
 # =============================================================================
-# Agentic RAG（Phase 6 预留，默认关闭；启用后走 Agent 循环而非直通检索）
+# Agentic RAG（Phase 6 已实施，默认关闭；启用后走 Agent 循环而非直通检索）
 # 对应 src/core/settings.py 的 AgentSettings 可选块，完整 schema 见 §9.4。
+# 可用 AGENT_ENABLED=true/false 环境变量翻转 enabled（_coerce_bool 宽容解析）。
 # =============================================================================
-# agent:
-#   enabled: false            # false → NoneAgent，保持 query_knowledge_hub 直通
-#   strategy: "react"         # react | plan_and_execute | self_ask
-#   max_iterations: 5
-#   router: { enabled: true, provider: "rule" }
-#   memory: { enabled: false, backend: "none", window_size: 10 }
-#   reflection: { enabled: true, max_retrieval_rounds: 2 }
-#   tools:
-#     - "query_knowledge_hub"
-#     - "list_collections"
-#     - "get_document_summary"
+agent:
+  enabled: false            # false → NoneAgent，保持 query_knowledge_hub 直通
+  strategy: "react"         # react | plan_and_execute | self_ask
+  max_iterations: 5
+  router: { enabled: true, provider: "rule" }
+  memory: { enabled: false, backend: "none", window_size: 10 }
+  reflection: { enabled: true, max_retrieval_rounds: 2 }
+  tools:
+    - "query_knowledge_hub"
+    - "list_collections"
+    - "get_document_summary"
 
 # =============================================================================
 # Prompt 模板映射（Phase 5）

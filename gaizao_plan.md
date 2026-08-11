@@ -16,7 +16,7 @@
 | 2 | **真实 API Key 明文入库** | [config/settings.yaml](config/settings.yaml) llm/embedding/vision 三处 `sk-ws-...`，被 git 跟踪且未被 .gitignore 忽略 |
 | 3 | **纯检索，无问答生成** | `query_knowledge_hub` 是检索-only；`BaseLLM` 只用于 rerank/摄取，不生成答案 |
 | 4 | **评测指标失真** | [golden_test_set.json](tests/fixtures/golden_test_set.json) 的 `expected_chunk_ids`/`expected_sources` 全为空 → hit_rate/mrr 恒为 0 |
-| 5 | **入口是桩** | [main.py](main.py) 只 print 后返回 0；`mcp-server` 控制台脚本并不真正启动服务器 |
+| 5 | **入口是桩**（已解决，Phase E） | [main.py](main.py) 薄启动器委托 `src/mcp_server/server.py`；`mcp-server = "src.mcp_server.server:main"` |
 | 6 | **无自检/引导/版本锁定** | 无 bootstrap、无 self_check、无 `.python-version` |
 | 7 | **数据更新有孤儿 chunk bug** | BM25 `remove_document` 按内容 hash 前缀匹配，chunk_id 前缀是 source_path hash → 内容变更重摄留下孤儿（Phase 4 处理） |
 
@@ -61,11 +61,12 @@ data/                本地内嵌存储（ChromaDB / SQLite / BM25 JSON），首
 |---|---|---|---|
 | Phase 0 | 配置治理 | 密钥治理 + env 优先 + 模板 | ✅ 实施 |
 | Phase 1 | 可复现地基 | 依赖锁定 + 一键引导 + 自检 | ✅ 实施 |
-| Phase 2 | 生成式问答链路 | answer_generator + refusal/confidence/grounding | 路线图 |
-| Phase 3 | 评测闭环 | golden 补齐 + 多指标 + 报告对比 | 路线图 |
+| Phase 2 | 生成式问答链路 | answer_generator + refusal/confidence/grounding | ✅ 实施 |
+| Phase 3 | 评测闭环 | golden 补齐 + 多指标 + 报告对比 | ✅ 实施 |
 | Phase 4 | 数据版本与更新 | 孤儿 GC + 版本跟踪 + 原子更新 | ✅ 实施 |
 | Phase 5 | Prompt + 文档 + CI | prompt 版本化 + REPRODUCE.md + CI | ✅ 实施 |
-| Phase 6 | Agentic RAG 能力层 | Agent 循环/工具/路由/记忆/反射 | 路线图（前瞻设计，见 §9） |
+| Phase 6 | Agentic RAG 能力层 | Agent 循环/工具/路由/记忆/反射 | ✅ 实施（2026-08-11） |
+| Phase E | MCP 真实入口 | main.py 薄启动器 + 控制台脚本指向真实服务器 | ✅ 实施（2026-08-11） |
 
 依赖关系：Phase 2–6 全部依赖 Phase 0 的配置地基（env 优先 + 可扩展 settings）与 Phase 1 的可复现环境。
 

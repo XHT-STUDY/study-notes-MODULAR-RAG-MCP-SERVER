@@ -127,7 +127,7 @@ VISION_BASE_URL=https://<网关>/compatible-mode/v1
 
 ## 7. MCP 服务器握手（真入口）
 
-> `main.py` 和 `mcp-server` 控制台命令是 **stub**，不启动服务器。真入口是 `src\mcp_server\server.py`。
+> `python main.py` 与 `mcp-server` 控制台命令均启动同一 stdio 服务器；真入口实现是 `src\mcp_server\server.py`（`main.py` 是薄启动器，先校验配置再委托）。
 
 ```powershell
 $body = @'

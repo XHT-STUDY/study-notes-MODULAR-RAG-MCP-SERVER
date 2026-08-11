@@ -32,6 +32,119 @@
 
 ---
 
+## Phase E — MCP 真实入口（2026-08-11）
+
+### 1. 本次开发了哪些内容
+
+修复 `gaizao_plan.md` §1.1 问题 #5「入口是桩」：`main.py` 只 print 后返回 0、`pyproject.toml` 控制台脚本 `mcp-server = "main:main"` 指向它，**`mcp-server` 命令不启动任何服务器**。真实服务器 `src/mcp_server/server.py` 早已完整（e2e 一直在用 `python -m src.mcp_server.server` 驱动），本次把两个入口都接到它。
+
+- **`pyproject.toml`**：`[project.scripts]` 由 `mcp-server = "main:main"` 改为 `mcp-server = "src.mcp_server.server:main"`。`main.py` 在仓库根、不在 hatch `packages=["src"]` 包内，`main:main` 作为控制台脚本在仓库根之外必然 `ModuleNotFoundError`；改包内模块入口后 CWD 无关、安装即用。
+- **`main.py`**：stub → 薄启动器。删除全部 stdout print（stdout 是 JSON-RPC 通道，污染即破坏协议）；先 `load_settings("config/settings.yaml")` fail-fast（`SettingsError` → 错误写 stderr + 返回 1，比"服务器能启但工具调用全挂"好）；成功 → 延迟导入 `src.mcp_server.server.main` 并委托。日志走 stderr（`get_logger` 默认 stderr，server 启动即把 root handler 全部重定向 stderr）。
+- **新测试 `tests/unit/test_server_entry.py`**（5 用例，已加入 CI ruff scope）：断言 pyproject 控制台脚本指向 `src.mcp_server.server:main`（防回归到 stub）；`main.main()` 委托真实 `server.main` 并透传返回值；配置错误 → 返回 1 且错误只走 stderr；成功路径 stdout 为空（capsys 锁定无协议污染）；server 模块暴露 `main`/`run_stdio_server`。
+
+### 2. 测试方法与预期效果
+
+```powershell
+# 新测试
+.\.venv-3.12\Scripts\python.exe -m pytest tests/unit/test_server_entry.py -q          # 5 passed in 0.65s
+.\.venv-3.12\Scripts\python.exe -m ruff check tests/unit/test_server_entry.py main.py  # All checks passed（0 报错）
+# 入口冒烟（acceptance）：在仓库根之外（%TEMP%）运行安装的 mcp-server → initialize 返回 serverInfo + tools/list 返回 4 工具
+# python main.py（仓库根）→ initialize 同样返回 serverInfo
+```
+
+### 3. 本次改动的原因
+
+三处表象：(a) `mcp-server` 安装命令不启动任何服务器；(b) `main:main` 依赖仓库根在 sys.path，安装后不可用；(c) 两个 setup skill（`.claude/skills/setup/SKILL.md`、`.github/skills/setup/SKILL.md`）与 QA 计划的 Quick Start 都让用户 `python main.py` 启动 MCP 服务器，但它是 stub。后果：按文档/skill 启动服务器必然失败。本次让两个入口都真实可用。
+
+### 4. 重点难点
+
+- **stdout 是协议通道**：MCP stdio 传输中 stdout 只允许 JSON-RPC，`main.py` 原有 `print("...Starting...")` 直接污染协议。解法：main.py 全程不 print 到 stdout，日志走 logging（`get_logger` 默认 stderr，`server.py:25-44` 启动即重定向所有 root handler）；测试用 `capsys` 锁定成功路径 stdout 为空。
+- **入口必须包内**：`main:main` 在 `pip install` 后不可导入；`src.mcp_server.server:main` 是包内模块、CWD 无关——这是最本质的一行修复。
+- **`load_settings` 路径 CWD 无关**：`settings.py:656-657` 用 `resolve_path` 把相对路径解析到仓库根，所以 `python main.py` 从任意目录都能找到配置；fail-fast 只在配置真缺失/损坏时触发（单测用 monkeypatch 锁定该分支）。
+
+### 5. 你应该学到什么
+
+- MCP stdio 服务器**任何 stdout 输出都是协议损坏**——launcher 层只做配置校验与委托，输出一律 stderr。
+- 控制台脚本入口必须指向**包内模块**（`src.xxx:func`）；指向仓库根模块（`main:main`）在安装后不可用。
+- fail-fast：坏配置启动时报错（exit 1）优于"服务器启动但每个工具调用都挂"。
+
+### 6. 验证结果与遗留事项
+
+- `test_server_entry.py`：**5/5 passed**（0.65s）；ruff（新文件 + main.py）：**0 报错**。
+- 入口冒烟：**安装的 `mcp-server` 在仓库根之外（%TEMP%）运行** → initialize 返回 `serverInfo{modular-rag-mcp-server v1.29.0}`、tools/list 返回 **4 工具**（query_knowledge_hub / list_collections / get_document_summary / agent_query）；`python main.py`（仓库根）→ initialize 同样返回 serverInfo。
+- e2e `test_mcp_client.py`：**6 passed / 1 failed**（failed 为 `test_multiple_tool_calls_same_session`，list_collections/query 命中 ChromaDB `Could not connect to tenant default_tenant`，**预存环境问题**，非 Phase E 引入）。
+- 全量回归 `pytest -m "not llm"`：**1637 passed / 29 failed / 8 skipped / 5 deselected / 29 errors**（基线 1632/29/8/29；**+5 即新增的 test_server_entry，29 failed + 29 errors 全部为既有环境失败**：真实 API 缺失的 smoke、ChromaDB tenant、Windows 文件锁、jieba 分词、`elapsed_ms()==0` 计时断言、list_collections 位置参数 mock）。
+- **遗留**：真实 API key 仍在 git 历史，需用户轮换（独立事项）；`golden_test_set.json` chunk 级 id 留空为设计使然（源级为主，`verify_golden_set.py --refresh-ids` 生成本机副本）；rerank 保持关闭（等真实 rerank 评测证据）。
+- **安全提醒**：本次未向 git 追踪文件写入任何 API key。
+
+## Phase 6 — Agentic RAG 能力层（2026-08-11）
+
+### 1. 本次开发了哪些内容
+
+按 `gaizao_plan.md` §9 交付收官阶段「Agentic RAG 能力层」。用户拍板 3 个决策：**三策略全实现**（react 默认完整闭环 + plan_and_execute / self_ask 轻量变体，共享循环基座）；**`agent.enabled=false`（默认）时 `agent_query` 降级为直通检索**（与 `query_knowledge_hub` 字节级等价、工具永远可用）；**`chat_with_tools()` = 文本协议降级**（工具 schema 序列化进 system prompt，LLM 以 `<tool_call name="...">{"json"}</tool_call>` 文本回复，**5 个 provider 零改动**、无原生 function-calling）。零新增第三方依赖。
+
+- **新增 `src/core/agent/`**（9 个模块，只依赖 `src/core/*` + `src/libs/*`，绝不 import `src.mcp_server.*`/`mcp` SDK）：
+  - `base_agent.py`：`AgentResult`（answer/content/intermediate_steps/citations/confidence/refusal_reason/is_empty/strategy）+ `BaseAgent` ABC（`run(query, trace)`，注入式 ctor，registry/llm/memory/router/reflector/query_understanding/direct_retriever 均可缺省懒建）+ `NoneAgent`（enabled=false → 委托 direct_retriever 直通）。
+  - `base_tool.py` + `tool_registry.py`：`FunctionTool` 包装**注入的 async callable**（分层缝隙，不碰 `ToolDefinition`）；`ToolRegistry` 的 `is_allowed` 要求**注册且在白名单**，未知/越权工具 → `is_error`。
+  - `query_router.py`：`RouteResult`{target, tool_name, reason} + `RuleRouter`（关键词正则：collection/列表/总结→tool，对比/比较/区别→multi_hop，否则 direct_rag）+ `LLMRouter`（分类 prompt，`asyncio.to_thread` 包 `llm.chat`，异常/malformed 回退 rule）+ `RouterFactory`。
+  - `query_understanding.py`：`understand(query, trace) -> ProcessedQuery` —— **全仓库唯一填充 `expanded_terms` 处**（同义词/别名/缩写/中英别名离线规则表，LLM 注入时可选扩展）。
+  - `memory.py`：`ConversationMemory` ABC + `NoneMemory`（no-op）+ `SQLiteMemory`（镜像 `file_integrity.py` 模式：WAL + `CREATE TABLE IF NOT EXISTS` + 每调用关连接；`conversation_memory(session_id, role, content, created_at)` + 窗口式 recent）+ `MemoryFactory`。
+  - `reflection.py`：`ReflectionDecision`{needs_retrieval, reason, rewritten_query} + `RetrievalReflector`（规则评估：`len(results)<min_results` 或 top score 低于 coverage_threshold → 重检；`rewrite()` 把 `expanded_terms` 拼回原 query；`max_retrieval_rounds` 上限）。
+  - `agent_runner.py`：`RetrievalEngine`（自包含镜像 QueryKnowledgeHubTool 组件装配：EmbeddingFactory/VectorStoreFactory/create_dense_retriever/create_sparse_retriever+BM25Indexer/QueryProcessor/create_hybrid_search/create_core_reranker/ResponseBuilder，懒初始化，组件可注入）+ `_BaseLoopAgent`（共享 ReAct 循环基座：router 预路由 → planning → 循环内 `parse_tool_call` → 白名单检查 → `query_knowledge_hub` 检索工具拦截（走 RetrievalEngine 而非 registry 防递归）→ 反射二次检索 → 其余 `registry.call` → 回喂 assistant+tool 消息 → memory.add → grounding `sanitize_citation_markers` 越界剔除 → `_citations_from`）→ `ReActAgent` / `PlanAndExecuteAgent`（`_pre_loop` 规划调用 + `Final Answer:` 剥离）/ `SelfAskAgent`（前缀剥离）。每次 `llm.chat_with_tools`/`_search_tool` 都过 `asyncio.to_thread`（防 stdio 传输卡死）。
+  - `__init__.py`：`AgentFactory`（`_PROVIDERS`{react, plan_and_execute, self_ask} + `_LAZY_PROVIDERS` 预留 + 双入参 create 照抄 AnswerGeneratorFactory + `NoneAgent` 降级 + register/list_providers）。
+- **新增 `src/mcp_server/tools/agent_query.py`**：`TOOL_NAME="agent_query"`，`AgentQueryTool._build_registry` 把 `protocol_handler.tools` 按 `agent.tools` 白名单过滤（**显式 `continue` TOOL_NAME 防递归**）包装成 `FunctionTool`；`execute()`：禁用 → **直接 `await query_knowledge_hub_handler(query, top_k, collection)`**（字节级等价）；启用 → `TraceContext(trace_type="agent")` → `AgentFactory.create(settings, registry=..., direct_retriever=...)` → `agent.run(query, trace)` → `_agent_result_to_mcp`（MCPToolResponse，None 字段省略，metadata{strategy, intermediate_steps, refusal_reason?}）→ `TraceCollector.collect`。接入 `protocol_handler.py:_register_default_tools()`（第 4 个工具）。
+- **修改**：`src/libs/llm/base_llm.py`（`Message` 加 `tool_calls`/`tool_call_id` 可选字段、content 保持非可选 str、role 白名单加 `"tool"`、具体方法 `chat_with_tools` 注入工具附录到**首条 system 消息的副本**、模块级 `ToolCall`/`format_tool_call`/`parse_tool_call`/`build_tools_system_prompt`）；`src/core/settings.py`（`RouterSettings`/`MemorySettings`/`ReflectionSettings`/`AgentSettings` + `Settings.agent` 可选块 + `_ENV_OVERRIDES` 加 `AGENT_ENABLED` + 宽容 bool 助手 `_coerce_bool`）；`src/core/trace/trace_context.py`（trace_type literal 拓宽加 `"agent"`）；两份 `settings.yaml`（激活 `agent:` 块：enabled:false / strategy react / max_iterations 5 / router rule / memory none window 10 / reflection true rounds 2 / tools 3）；`.github/workflows/ci.yml`（ruff 行 scope 追加 Phase 6 新增文件）。
+
+### 2. 测试方法与预期效果
+
+```powershell
+# Phase 6 相关 14 个测试文件：135 passed（react 全循环/plan_and_execute/self_ask 剥离、chat_with_tools 副本注入、agent_query 降级与组装、AgentFactory 三策略、反射二次检索、记忆注入、白名单拒绝、max_iterations 耗尽等）
+.\.venv-3.12\Scripts\python.exe -m pytest -m "not llm" tests/unit/test_agent_factory.py tests/unit/test_agent_query.py tests/unit/test_agent_runner.py tests/unit/test_agent_settings.py tests/unit/test_base_agent.py tests/unit/test_base_tool.py tests/unit/test_chat_with_tools.py tests/unit/test_memory.py tests/unit/test_query_router.py tests/unit/test_query_understanding.py tests/unit/test_reflection.py tests/unit/test_tool_registry.py tests/unit/test_trace_agent.py   # 135 passed in 1.99s
+.\.venv-3.12\Scripts\python.exe -m ruff check src/core/agent src/mcp_server/tools/agent_query.py tests/unit/test_agent_factory.py tests/unit/test_agent_query.py tests/unit/test_agent_runner.py tests/unit/test_agent_settings.py tests/unit/test_base_agent.py tests/unit/test_base_tool.py tests/unit/test_chat_with_tools.py tests/unit/test_memory.py tests/unit/test_query_router.py tests/unit/test_query_understanding.py tests/unit/test_reflection.py tests/unit/test_tool_registry.py tests/unit/test_trace_agent.py   # All checks passed（0 报错）
+.\.venv-3.12\Scripts\python.exe scripts/self_check.py --json      # 9 OK / 0 FAIL，Result: PASS，exit 0
+.\.venv-3.12\Scripts\python.exe scripts/prompts.py --verify       # OK: verified 4 prompt(s)，exit 0
+git diff --stat src/mcp_server/tools/query_knowledge_hub.py        # 无输出 —— query_knowledge_hub 零改动
+.\.venv-3.12\Scripts\python.exe -m pytest -m "not llm"             # 全量回归（见 §6 数字）
+```
+
+### 3. 本次改动的原因
+
+- **系统"仅检索、不生成"**：`query_knowledge_hub` 是一次性混合检索，无法多步推理、调用其他工具、利用会话上下文、自校正 → 新增 Agent 循环层，且默认关闭时对既有调用方零行为变化。
+- **无工具调用缝隙**：MCP 工具（list_collections / get_document_summary）没有供 LLM 编排调用的入口 → `agent_query` 把 protocol_handler 的工具按白名单包成 FunctionTool，agent 循环内可编排。
+- **路由/记忆/反射缺失**：`ProcessedQuery.expanded_terms` 声明但全仓库永远为空、无会话记忆、无重检机制 → `query_understanding`（唯一填充 expanded_terms）/ `memory` / `reflection` 补齐，全部复用工厂注册 + None 降级约定。
+- **LLM provider 无 function-calling**：5 个 provider（openai/azure/ollama/qwen/gemini）各有原生工具调用差异 → 用文本协议 `<tool_call>` 统一降级，`Message` 只加可选元数据字段，provider 序列化 `{role, content}` 零改动。
+
+### 4. 重点难点
+
+- **分层缝隙**：`src/core/agent` 绝不 import `mcp_server`/`mcp` SDK —— `FunctionTool` 只收**注入的 async callable**；`ToolDefinition→callable` 适配只在 `agent_query.py` 的 `_invoke` 里做。
+- **陷阱①（env 字符串 vs bool）**：`_ENV_OVERRIDES` 注入的是字符串 `"true"`，而 `_require_bool` 要求真 `bool` → `agent.enabled` 用宽容 `_coerce_bool`（接受 bool + `"true"/"false"/"1"/"0"`）解析，子块 enabled 用普通 `_require_bool`（非 env 覆盖）。
+- **陷阱②（不 mutate 调用方消息）**：循环复用同一 `messages` 列表，`chat_with_tools` 把工具附录注入**首条 system 消息的副本**，原地 append 会让附录每轮翻倍。
+- **防递归**：`agent_query` 双重防递归（`_build_registry` 显式跳过 TOOL_NAME + 默认白名单不含它）；检索工具拦截走 RetrievalEngine 而非 registry.call。
+- **async/阻塞**：循环里**每次** `llm.chat_with_tools` / `_search_tool` / `LLMRouter.chat` 都过 `asyncio.to_thread`，否则 stdio 传输卡死（与 query_knowledge_hub 同因）。
+- **CI 无配置文件**：`config/settings.yaml` gitignored、CI 中不存在，而 `load_settings()` 缺失会 raise → 新测试用 autouse fixture 注入 `SimpleNamespace(agent=...)` 或 monkeypatch `load_settings`，杜绝配置文件依赖。
+- **ruff 基线 7294 违规**：CI ruff 仍只 scope 新增文件；修改的既有文件（settings.py/base_llm.py/trace_context.py/protocol_handler.py）本地确认干净但不进 CI ruff 命令。
+- **Message.content 保持非可选 str**：文本协议保证非空；`tool_calls`/`tool_call_id` 仅元数据，不放松 content 为 Optional。
+
+### 5. 你应该学到什么
+
+- **共享循环基座 + 策略差异最小化**：三策略只差系统提示词、`_pre_loop`（planning）与 `_parse_final`（前缀剥离），99% 逻辑（白名单/拦截/反射/记忆/grounding）在一处 —— 变体策略的成本被压到最低。
+- **字节级降级 = 永远可用的安全网**：新能力默认关闭时直接委托既有函数（`await query_knowledge_hub_handler(...)`），调用方零感知、工具列表恒可用，这是"默认不破坏"的黄金标准。
+- **文本协议降级零 provider 改动**：把工具 schema 序列化进 system prompt + 一行 `<tool_call>` 文本，比对接各 provider 原生 function-calling 廉价且统一；代价是解析脆弱，需 `parse_tool_call` 返回 `(ToolCall,None)/(None,error)/(None,None)` 三态 + 格式错误回喂。
+- **工厂 + None 降级贯穿全栈**：Agent/LLM/Memory/Router/Reflection 全部同一套 `_PROVIDERS` + `create(settings, **kwargs)` + None 短路约定，加一个能力 = 加一个模块 + 一行注册。
+- **CI 只扫新增文件的存量债务策略**：仓库 7294 违规不改，新代码强制干净 —— 让 CI 长期绿灯又不阻塞既有文件演进。
+
+### 6. 验证结果与遗留事项
+
+- **实际数字**：Phase 6 相关 **135/135 通过**（14 个测试文件，1.99s）；ruff 新文件 **0 报错**；self_check **9 OK exit 0**；`prompts.py --verify` **OK 4 prompts exit 0**；`query_knowledge_hub.py` **git diff 为空（零改动）**；全量回归 `pytest -m "not llm"`：**1632 passed / 29 failed / 8 skipped / 29 errors** —— 29 failed + 29 errors 逐一归因为**既有环境失败项**（真实 API 缺失的 azure/llm/embedding smoke、ChromaDB tenant 初始化失败、Windows Chroma 文件锁 `PermissionError`、jieba 分词、`elapsed_ms()==0.0` 计时、list_collections 位置参数 mock），与本阶段无关；`test_e2e/test_mcp_client.py` 失败于 `Could not connect to tenant default_tenant`（ChromaDB 后端不可连），agent_query 已随 initialize 正常注册。
+- **遗留/安全提醒**：
+  - 真实 API key 仍在 git 历史（Phase 0 已知），需用户轮换；本次未向 git 追踪文件写入任何密钥，`config/settings.yaml` 保持 gitignored。
+  - `agent.enabled` 默认 `false`：`agent_query` 与 `query_knowledge_hub` 行为一致；启用 agent 需真实 LLM（llm.provider 非 none）与已摄取数据，且 `agent.tools` 白名单默认仅 3 个检索工具。
+  - agent 追踪落 `logs/traces.jsonl`（`trace_type="agent"`），仪表盘按 `"query"/"ingestion"` 精确过滤，故 agent 追踪暂不上仪表盘页——已记录在案，未来可扩展。
+  - 仓库级 ruff 清理（7294 违规）仍是后续债务；CI ruff 当前 scope Phase 5 + Phase 6 新增文件。
+  - 全量回归的 29 failed / 29 errors 为既有环境债务，Phase 7 起如进入"环境修复"阶段可逐项清零；`gaizao_plan.md` 路线图 Phase 0–6 已全部 ✅ 实施。
+
+---
+
 ## Phase 5 — Prompt 管理 + 文档 + CI（2026-08-10）
 
 ### 1. 本次开发了哪些内容

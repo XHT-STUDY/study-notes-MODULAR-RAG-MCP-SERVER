@@ -27,8 +27,8 @@ jobs:
       - name: Prompt templates verify
         run: python scripts/prompts.py --verify
 
-      - name: Ruff (Phase 5 files)
-        run: ruff check src/core/prompts.py scripts/prompts.py tests/unit/test_prompt_registry.py
+      - name: Ruff (new files: Phase 5 + Phase 6 + Phase E)
+        run: ruff check src/core/prompts.py scripts/prompts.py tests/unit/test_prompt_registry.py src/core/agent src/mcp_server/tools/agent_query.py tests/unit/test_agent_factory.py tests/unit/test_agent_query.py tests/unit/test_agent_runner.py tests/unit/test_agent_settings.py tests/unit/test_base_agent.py tests/unit/test_base_tool.py tests/unit/test_chat_with_tools.py tests/unit/test_memory.py tests/unit/test_query_router.py tests/unit/test_query_understanding.py tests/unit/test_reflection.py tests/unit/test_tool_registry.py tests/unit/test_trace_agent.py tests/unit/test_server_entry.py
 
       - name: Tests (no LLM)
         run: python -m pytest -m "not llm"

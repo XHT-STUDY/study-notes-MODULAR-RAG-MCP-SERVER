@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **定位**：学习 / 面试作品项目，**非生产项目**，README 声明不再积极扩展。
 - **插件式架构**：LLM / Embedding / Reranker / Splitter / VectorStore / Evaluator 均可通过 `config/settings.yaml` 切换，无需改代码。
-- **注意**：当前系统**仅检索、不生成 LLM 答案**（`BaseLLM` 只用于重排和摄取变换：chunk 精炼、元数据增强、图片描述）。
+- **注意**：默认配置下（`agent.enabled=false`）系统**仅检索、不生成 LLM 答案**（`BaseLLM` 只用于重排和摄取变换：chunk 精炼、元数据增强、图片描述）。Phase 6 的 `agent_query` 工具在启用 agent 时会让 LLM 参与工具调用解析与最终答案生成（`BaseLLM.chat_with_tools` 文本协议降级，无原生 function-calling）。
 
 ## 常用命令
 
@@ -41,7 +41,7 @@ python scripts/evaluate.py [--test-set path] [--collection <集合名>] [--top-k
 python scripts/start_dashboard.py --port 8501
 ```
 
-**注意**：`main.py` 目前是 **stub**（只打印 "MCP Server will be implemented in Phase E"），`mcp-server` 控制台脚本也指向它，均未启动服务器。真正的 MCP 服务器入口是 `python src/mcp_server/server.py`。
+**注意**：`main.py` 是**薄启动器**（校验配置后委托真实服务器，fail-fast），`mcp-server` 控制台脚本指向 `src.mcp_server.server:main`。两种入口（`python main.py` 或 `mcp-server`）均启动同一 stdio 服务器；真入口实现见 `src/mcp_server/server.py`。
 
 **配置约定**：`load_settings()` 会自动加载 `config/.env`（不存在则跳过）。密钥与覆盖项放 `config/.env`，`config/settings.yaml` 中 `api_key`/`base_url` 字段留空。优先级：进程环境变量 > `config/.env` > `settings.yaml`。
 
@@ -86,17 +86,17 @@ python scripts/start_dashboard.py --port 8501
 
 ### MCP 工具注册
 
-`src/mcp_server/server.py` → `protocol_handler.py:create_mcp_server()` → `_register_default_tools()` 导入 `src/mcp_server/tools/*` 各模块，模块导出 `register_tool(protocol_handler)` 并声明 `TOOL_NAME` / `TOOL_DESCRIPTION` / `TOOL_INPUT_SCHEMA`（JSON Schema）+ async handler。现有 3 个工具：`query_knowledge_hub`（主检索工具，按集合懒加载）、`list_collections`、`get_document_summary`。
+`src/mcp_server/server.py` → `protocol_handler.py:create_mcp_server()` → `_register_default_tools()` 导入 `src/mcp_server/tools/*` 各模块，模块导出 `register_tool(protocol_handler)` 并声明 `TOOL_NAME` / `TOOL_DESCRIPTION` / `TOOL_INPUT_SCHEMA`（JSON Schema）+ async handler。现有 4 个工具：`query_knowledge_hub`（主检索工具，按集合懒加载）、`list_collections`、`get_document_summary`、`agent_query`（Phase 6 Agentic RAG；`agent.enabled=false` 默认降级为直通检索，与 `query_knowledge_hub` 字节级等价）。
 
 **MCP 服务器关键约定**：所有日志重定向到 stderr（stdout 保留给 JSON-RPC）；工具 handler 内阻塞 I/O 用 `asyncio.to_thread()`；重型 import（chromadb 等）在主线程预加载避免 import-lock 死锁。`query_knowledge_hub` 中 `SparseRetriever` 每次查询重载 BM25 索引，因此仪表盘摄取的数据无需重启服务器即可检索到。
 
 ## 已知问题与进行中改造
 
-- **`gaizao_plan.md` 是当前改造方案（Phase 0–6，Phase 0–5 已完成，6 规划中），改代码前先读它**。已确认的问题：
+- **`gaizao_plan.md` 是当前改造方案（Phase 0–6 + Phase E 全部完成），改代码前先读它**。已确认的问题：
   - 真实 API key 曾提交进 `config/settings.yaml` —— **Phase 0 已实施**（环境变量优先 + 模板化 + gitignore + 停止跟踪，见 `DEVELOPMENT_LOG.md`）；key 仍在 git 历史，需用户轮换。
   - 依赖 `>=` 无锁、环境不可复现 —— **Phase 1 已实施**（`.python-version` 3.12 + `uv.lock` + `scripts/bootstrap.py` + 一键引导，见 `DEVELOPMENT_LOG.md`）。全新环境：`.\bootstrap.bat --seed`。
-  - `main.py` / `mcp-server` 控制台脚本是 stub（Phase E 内容缺失）。
-  - `tests/fixtures/golden_test_set.json` 的 `expected_chunk_ids`/`expected_sources` 为空，导致 hit_rate/mrr 恒为 0。
+  - `main.py` / `mcp-server` 入口是桩 —— **Phase E 已实施**（`mcp-server = "src.mcp_server.server:main"` + `main.py` 薄启动器，见 `DEVELOPMENT_LOG.md`）。
+  - `tests/fixtures/golden_test_set.json` 的 `expected_sources` 已填（源级为主），`expected_chunk_ids` 留空是**设计使然**（chunk id 依赖本机路径 hash，跨机不可移植）；需要 chunk 级指标时用 `scripts/verify_golden_set.py --refresh-ids` 生成本机 golden（gitignored）。
   - **Phase 4 已实施**（数据版本与更新闭环，见 `DEVELOPMENT_LOG.md`）：修复 BM25 `remove_document` 孤儿 bug（chunk-id 前缀统一为 `sha256(source_path)[:8]`）；跨存储删除改为事务式（捕获快照 → 失败回滚）；新增 `DocumentVersionStore`（`data/db/ingestion_history.db` 同库 `document_versions` 表 + `data/versions/{collection}/{file_hash}/` 内容快照）、`rollback_document`（快照重摄回滚）、`OrphanGC`（`scripts/gc.py --collection X --dry-run`）；rerank 保持关闭。
 - 重要文档：`ARCHITECTURE.md`（架构详解）、`DEV_SPEC.md`（224KB 开发规范，含测试策略 §4）、`README.md`、`RESUME.md`。
 - CI 已配置：`.github/workflows/ci.yml`（uv sync --locked + self_check + prompts --verify + ruff(仅新文件) + pytest -m "not llm"），与 `REPRODUCE.md` 手动路径等价。

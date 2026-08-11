@@ -1,37 +1,39 @@
 """
-Modular RAG MCP Server - Main Entry Point
+Modular RAG MCP Server - Main Entry Point (thin launcher).
 
-This is the entry point for the MCP Server. It initializes the configuration,
-sets up logging, and starts the server.
+``python main.py`` starts the real stdio MCP server implemented in
+``src.mcp_server.server``.  This module only adds a fail-fast
+configuration check before delegating; all logging goes to stderr so
+stdout stays reserved for the JSON-RPC protocol.
 """
+
+from __future__ import annotations
 
 import sys
 from pathlib import Path
 
 from src.core.settings import SettingsError, load_settings
-from src.observability.logger import get_logger
 
 
 def main() -> int:
     """
-    Main entry point for the MCP Server.
-    
+    Validate configuration, then start the stdio MCP server.
+
     Returns:
         int: Exit code (0 for success, non-zero for failure)
     """
-    print("Modular RAG MCP Server - Starting...")
-
-    settings_path = Path("config/settings.yaml")
+    # Fail fast on a missing/invalid config — better than a server that
+    # starts but cannot serve tool calls. Errors go to stderr only.
     try:
-        settings = load_settings(settings_path)
+        load_settings(Path("config/settings.yaml"))
     except SettingsError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
 
-    logger = get_logger(log_level=settings.observability.log_level)
-    logger.info("Settings loaded successfully.")
-    logger.info("MCP Server will be implemented in Phase E.")
-    return 0
+    # Lazy import so that config failures never pull in heavy MCP deps.
+    from src.mcp_server.server import main as run_mcp_server
+
+    return run_mcp_server()
 
 
 if __name__ == "__main__":
