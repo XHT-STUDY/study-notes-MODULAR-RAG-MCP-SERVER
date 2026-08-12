@@ -2,6 +2,8 @@
 
 > 一个可插拔、可观测的模块化 RAG（检索增强生成）服务框架，通过 MCP（Model Context Protocol）协议对外暴露工具接口，支持 Copilot / Claude 等 AI 助手直接调用。同时也是一份专为**大模型相关岗位学习与面试求职**设计的实战项目与配套教学资源。
 
+> 📌 **快速导航**：项目说明见 [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)；全新环境配置 / 启动 / 测试 / 日常使用见 [USAGE_GUIDE.md](USAGE_GUIDE.md)。
+
 ---
 
 ## 📖 目录
