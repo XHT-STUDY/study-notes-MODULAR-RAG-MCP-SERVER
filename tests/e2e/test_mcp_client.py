@@ -59,22 +59,21 @@ def _send_jsonrpc(
     expected_responses: int,
     timeout: float = 15.0,
 ) -> List[Dict[str, Any]]:
-    """Send JSON-RPC messages and collect the expected number of responses.
-
-    Uses a background thread to read stdout so that the ``timeout`` is
-    always respected even when ``readline()`` blocks.
-
-    Args:
-        proc: Subprocess with stdin/stdout pipes.
-        messages: List of JSON-RPC requests / notifications.
-        expected_responses: How many JSON-RPC *responses* (with ``id``) to wait for.
-        timeout: Max seconds to wait.
-
-    Returns:
-        Parsed JSON-RPC response dicts (only entries with ``id``).
-    """
     assert proc.stdin is not None
     assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    stderr_lines: List[str] = []
+
+    def _stderr_reader() -> None:
+        for line in proc.stderr:
+            stderr_lines.append(line.rstrip())
+
+    stderr_thread = threading.Thread(
+        target=_stderr_reader,
+        daemon=True,
+    )
+    stderr_thread.start()
 
     for msg in messages:
         proc.stdin.write(json.dumps(msg) + "\n")
@@ -84,30 +83,41 @@ def _send_jsonrpc(
     stop_event = threading.Event()
 
     def _reader() -> None:
-        """Read stdout lines in a daemon thread so timeout can interrupt."""
         while not stop_event.is_set():
-            line = proc.stdout.readline()  # type: ignore[union-attr]
+            line = proc.stdout.readline()
             if not line:
                 break
+
             stripped = line.strip()
             if not stripped:
                 continue
+
             try:
                 data = json.loads(stripped)
             except json.JSONDecodeError:
                 continue
+
             if "id" in data and ("result" in data or "error" in data):
                 responses.append(data)
+
+                if len(responses) >= expected_responses:
+                    return
 
     reader_thread = threading.Thread(target=_reader, daemon=True)
     reader_thread.start()
 
-    # Wait until we have enough responses *or* timeout expires
-    deadline = time.time() + timeout
-    while len(responses) < expected_responses and time.time() < deadline:
-        time.sleep(0.1)
+    deadline = time.monotonic() + timeout
+    while len(responses) < expected_responses and time.monotonic() < deadline:
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
 
     stop_event.set()
+
+    if len(responses) < expected_responses and stderr_lines:
+        print("\nMCP server stderr:")
+        print("\n".join(stderr_lines[-100:]))
+
     return responses
 
 
