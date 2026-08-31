@@ -17,15 +17,16 @@ from src.observability.dashboard.services.data_service import DataService
 
 
 def _run_ingestion(
-    uploaded_file: "st.runtime.uploaded_file_manager.UploadedFile",
+    uploaded_file: st.runtime.uploaded_file_manager.UploadedFile,
     collection: str,
-    progress_bar: "st.delta_generator.DeltaGenerator",
-    status_text: "st.delta_generator.DeltaGenerator",
+    progress_bar: st.delta_generator.DeltaGenerator,
+    status_text: st.delta_generator.DeltaGenerator,
 ) -> None:
     """Save the uploaded file to a temp location and run the pipeline."""
     from src.core.settings import load_settings
-    from src.core.trace import TraceContext, TraceCollector
+    from src.core.trace import TraceCollector, TraceContext
     from src.ingestion.pipeline import IngestionPipeline
+    from src.ingestion.pipeline_report import build_file_report
 
     settings = load_settings()
 
@@ -57,13 +58,34 @@ def _run_ingestion(
 
     try:
         pipeline = IngestionPipeline(settings, collection=collection)
-        pipeline.run(
+        print(f"[ingest] {uploaded_file.name} → collection '{collection}'", flush=True)
+        result = pipeline.run(
             file_path=tmp_path,
             trace=trace,
             on_progress=on_progress,
         )
+        trace.finish()
         progress_bar.progress(1.0, text="✅ Complete")
-        status_text.success(f"Successfully ingested **{uploaded_file.name}** into collection **{collection}**.")
+
+        skipped = result.stages.get("integrity", {}).get("skipped", False)
+        if result.success and skipped:
+            status_text.info(
+                f"**{uploaded_file.name}** 内容未变化，已在集合 **{collection}** 中，本次跳过（强制重摄请用 CLI `--force`）。"
+            )
+        elif result.success:
+            status_text.success(f"Successfully ingested **{uploaded_file.name}** into collection **{collection}**.")
+        else:
+            status_text.error(f"Ingestion failed: {result.error}")
+
+        # Stage-by-stage report, shared with scripts/ingest.py: rendered in
+        # the UI and mirrored to the server console so the ingest is visible
+        # in both places.  Kept in session state so it survives reruns.
+        report = build_file_report(
+            result, trace, settings, collection,
+            title=f"摄取报告 · {uploaded_file.name}",
+        )
+        st.session_state["last_ingest_report"] = report
+        print(report, flush=True)
     except Exception as exc:
         status_text.error(f"Ingestion failed: {exc}")
     finally:
@@ -97,6 +119,12 @@ def render() -> None:
             progress_bar = st.progress(0, text="Preparing…")
             status_text = st.empty()
             _run_ingestion(uploaded, collection.strip() or "default", progress_bar, status_text)
+
+    # Report of the most recent ingestion (survives reruns via session state)
+    report = st.session_state.get("last_ingest_report")
+    if report:
+        with st.expander("📋 摄取报告", expanded=True):
+            st.code(report, language=None)
 
     st.divider()
 

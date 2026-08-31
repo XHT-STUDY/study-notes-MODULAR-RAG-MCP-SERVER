@@ -260,19 +260,29 @@ class IngestionPipeline:
             logger.info("\n📋 Stage 1: File Integrity Check")
             _notify("integrity", 1)
             
+            _t0_integrity = time.monotonic()
             file_hash = self.integrity_checker.compute_sha256(str(file_path))
             logger.info(f"  File hash: {file_hash[:16]}...")
-            
+
             if not self.force and self.integrity_checker.should_skip(file_hash):
                 logger.info(f"  ⏭️  File already processed, skipping (use force=True to reprocess)")
                 return PipelineResult(
                     success=True,
                     file_path=str(file_path),
                     doc_id=file_hash,
-                    stages={"integrity": {"skipped": True, "reason": "already_processed"}}
+                    stages={"integrity": {
+                        "skipped": True,
+                        "reason": "already_processed",
+                        "file_hash": file_hash,
+                        "elapsed_ms": (time.monotonic() - _t0_integrity) * 1000.0,
+                    }}
                 )
-            
-            stages["integrity"] = {"file_hash": file_hash, "skipped": False}
+
+            stages["integrity"] = {
+                "file_hash": file_hash,
+                "skipped": False,
+                "elapsed_ms": (time.monotonic() - _t0_integrity) * 1000.0,
+            }
             logger.info("  ✓ File needs processing")
             
             # ─────────────────────────────────────────────────────────────
@@ -369,30 +379,39 @@ class IngestionPipeline:
             # 4a: Chunk Refinement
             logger.info("  4a. Chunk Refinement...")
             _t0_transform = time.monotonic()
+            _t0_refine = time.monotonic()
             # snapshot before refinement
             _pre_refine_texts = {c.id: c.text for c in chunks}
             chunks = self.chunk_refiner.transform(chunks, trace)
+            refine_ms = (time.monotonic() - _t0_refine) * 1000.0
             refined_by_llm = sum(1 for c in chunks if c.metadata.get("refined_by") == "llm")
             refined_by_rule = sum(1 for c in chunks if c.metadata.get("refined_by") == "rule")
             logger.info(f"      LLM refined: {refined_by_llm}, Rule refined: {refined_by_rule}")
-            
+
             # 4b: Metadata Enrichment
             logger.info("  4b. Metadata Enrichment...")
+            _t0_enrich = time.monotonic()
             chunks = self.metadata_enricher.transform(chunks, trace)
+            enrich_ms = (time.monotonic() - _t0_enrich) * 1000.0
             enriched_by_llm = sum(1 for c in chunks if c.metadata.get("enriched_by") == "llm")
             enriched_by_rule = sum(1 for c in chunks if c.metadata.get("enriched_by") == "rule")
             logger.info(f"      LLM enriched: {enriched_by_llm}, Rule enriched: {enriched_by_rule}")
-            
+
             # 4c: Image Captioning
             logger.info("  4c. Image Captioning...")
+            _t0_caption = time.monotonic()
             chunks = self.image_captioner.transform(chunks, trace)
+            caption_ms = (time.monotonic() - _t0_caption) * 1000.0
             captioned = sum(1 for c in chunks if c.metadata.get("image_captions"))
             logger.info(f"      Chunks with captions: {captioned}")
-            
+
             stages["transform"] = {
                 "chunk_refiner": {"llm": refined_by_llm, "rule": refined_by_rule},
                 "metadata_enricher": {"llm": enriched_by_llm, "rule": enriched_by_rule},
-                "image_captioner": {"captioned_chunks": captioned}
+                "image_captioner": {"captioned_chunks": captioned},
+                "refine_ms": refine_ms,
+                "enrich_ms": enrich_ms,
+                "caption_ms": caption_ms,
             }
             _elapsed_transform = (time.monotonic() - _t0_transform) * 1000.0
             if trace is not None:

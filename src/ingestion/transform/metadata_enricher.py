@@ -105,6 +105,17 @@ class MetadataEnricher(BaseTransform):
         if not chunks:
             return []
         
+        # Pre-load the prompt before spawning workers: _load_prompt() caches on
+        # first call, and parallel workers racing on that cache would each load
+        # (and log) the file again.  A load failure must not abort the run —
+        # per-chunk calls still fall back to rule-based enrichment.
+        if self.use_llm and self.llm:
+            try:
+                self._load_prompt()
+            except Exception as e:
+                logger.warning(f"Metadata enrichment prompt unavailable ({e}); "
+                               "workers will fall back to rule-based")
+
         # Process chunks in parallel if LLM is enabled
         if self.use_llm and self.llm:
             return self._transform_parallel(chunks, trace)
